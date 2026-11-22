@@ -5,6 +5,8 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <random>
+#include <deque>
+#include <functional>
 #include <algorithm>
 
 using namespace geode::prelude;
@@ -25,6 +27,16 @@ struct Brain {
     float cpX = 0.f;             // where his current checkpoint is (0 = none)
     float noCpBefore = 0.f;      // after giving up on a checkpoint, don't set another until he gets past here
     int sweep = 0;               // which nudge to try next on the jump before the spike
+    // training mode
+    int gen = 0;                 // finished generations
+    float genBestX = 0.f, genBestPct = 0.f;
+    std::vector<CCPoint> genBestPath;
+    std::vector<float> genHistory;               // best % of each generation (for the graph)
+    std::deque<std::vector<CCPoint>> oldPaths;   // best path of the last few generations
+    std::vector<CCPoint> bestPath;               // the path of his best run
+    std::vector<CCPoint> bestClicks;
+    std::deque<CCPoint> deaths;
+    int skipUntil = -1;                          // skip ahead until this generation is done
 };
 
 // ---------------------------------------------------------------- learning modes
@@ -44,6 +56,18 @@ static Mode const MODES[] = {
     {"Extreme", true,  120.f, 25, 5.f, 2.f, 0.03f, 0.10f},
 };
 static int s_mode = 1;
+static bool s_training = false;
+static int s_speedIdx = 1;
+static float const SPEEDS[] = {1.f, 4.f, 10.f, 20.f};
+static bool s_hitboxes = false;
+static bool s_trail = false;
+static int perGen() { return std::max(1, (int)Mod::get()->getSettingValue<int64_t>("attempts-per-generation")); }
+static int oldPathCount() { return std::max(0, (int)Mod::get()->getSettingValue<int64_t>("old-paths")); }
+static void applyFps() {
+    if (!Mod::get()->getSettingValue<bool>("fps-bypass")) return;
+    double fps = (double)std::max<int64_t>(30, Mod::get()->getSettingValue<int64_t>("fps"));
+    CCDirector::get()->setAnimationInterval(1.0 / fps);
+}
 static Mode const& mode() { return MODES[s_mode]; }
 
 static std::unordered_map<std::string, Brain> s_brains;
@@ -135,6 +159,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
         bool held = false;
         size_t idx = 0;
         std::vector<Hold> play;   // the trial, maybe with a slip in it
+        // training mode drawing
+        CCDrawNode* paths = nullptr;     // best path, old generations, clicks, deaths
+        CCDrawNode* live = nullptr;      // the attempt in progress
+        std::vector<CCPoint> cur;
+        std::vector<CCPoint> curClicks;
+        CCDrawNode* graph = nullptr;
+        CCLabelBMFont* genLabel = nullptr;
+        float fpsTimer = 0.f;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -142,6 +174,18 @@ class $modify(CodaPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool dontCreateObjects) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
         this->buildHud();
+        applyFps();
+        auto f = m_fields.self();
+        f->paths = CCDrawNode::create();
+        f->live = CCDrawNode::create();
+        if (m_objectLayer) { m_objectLayer->addChild(f->paths, 9000); m_objectLayer->addChild(f->live, 9001); }
+        f->graph = CCDrawNode::create();
+        f->hud->addChild(f->graph);
+        f->genLabel = CCLabelBMFont::create("", "chatFont.fnt");
+        f->genLabel->setScale(0.6f);
+        f->genLabel->setAnchorPoint({0.f, 0.5f});
+        f->genLabel->setPosition({12.f, 46.f});
+        f->hud->addChild(f->genLabel);
         if (s_enabled) this->codaStart();
         return true;
     }
@@ -209,6 +253,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->hud) f->hud->setVisible(false);
         this->restoreIcon();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
+        if (f->paths) { f->paths->clear(); f->live->clear(); f->graph->clear(); f->genLabel->setVisible(false); }
+        this->refreshDebugDraw();
         if (!m_isPlatformer) {
             this->removeAllCheckpoints();
             this->brain().cpX = 0.f;
@@ -226,6 +272,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->held = false;
     }
 
+    CCPoint playerPos() {
+        auto p = m_player1;
+        if (!p || !p->getParent() || !m_objectLayer) return {0, 0};
+        return m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
+    }
+
     // called every physics step, before the game moves the player
     void codaStep() {
         auto f = m_fields.self();
@@ -239,6 +291,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             this->handleButton(want, 1, true);
             s_fromBot = false;
             f->held = want;
+            if (want && s_training) f->curClicks.push_back(this->playerPos());
         }
     }
 
@@ -250,6 +303,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!s_enabled || m_isPlatformer) return;
         auto& b = this->brain();
         b.attempts++;
+        f->cur.clear(); f->curClicks.clear();
+        if (f->live) f->live->clear();
+        if (b.cpX > 0.f) for (auto& pt : b.bestPath) { if (pt.x < this->playerPos().x) f->cur.push_back(pt); else break; }
         f->play = (b.confirm || b.trial.empty()) ? b.best : b.trial;
         f->sloppy = false;
         // He's good, not perfect: sometimes he fumbles a jump he already knows.
@@ -273,6 +329,37 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     void onCodaDeath(float x, float pct) {
+        auto& b = this->brain();
+        float oldBest = b.bestX;
+        this->learnFromDeath(x, pct);
+        this->trainingBookkeeping(x, pct, b.bestX > oldBest + 0.5f);
+    }
+
+    void trainingBookkeeping(float x, float pct, bool newBest) {
+        auto f = m_fields.self();
+        auto& b = this->brain();
+        auto here = this->playerPos();
+        f->cur.push_back(here);
+        b.deaths.push_back(here);
+        while (b.deaths.size() > 80) b.deaths.pop_front();
+        if (newBest) { b.bestPath = f->cur; b.bestClicks = f->curClicks; }
+        if (x > b.genBestX) { b.genBestX = x; b.genBestPct = pct; b.genBestPath = f->cur; }
+        if (b.attempts % perGen() == 0) {               // a generation is done
+            b.gen++;
+            b.genHistory.push_back(std::max(b.genBestPct, 0.f));
+            if (!b.genBestPath.empty()) b.oldPaths.push_back(b.genBestPath);
+            while ((int)b.oldPaths.size() > oldPathCount()) b.oldPaths.pop_front();
+            b.genBestX = 0.f; b.genBestPct = 0.f; b.genBestPath.clear();
+            if (b.skipUntil >= 0 && b.gen >= b.skipUntil) {
+                b.skipUntil = -1;
+                s_speedIdx = 0;
+                say("Done skipping. Watch this.", 3.f);
+            }
+        }
+        this->redrawPaths();
+    }
+
+    void learnFromDeath(float x, float pct) {
         auto f = m_fields.self();
         auto& b = this->brain();
         this->release();
@@ -325,6 +412,82 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
     }
 
+    static void polyline(CCDrawNode* n, std::vector<CCPoint> const& pts, float r, ccColor4F c, bool dashed = false) {
+        for (size_t i = 1; i < pts.size(); i++) {
+            if (dashed && (i / 3) % 2) continue;
+            n->drawSegment(pts[i - 1], pts[i], r, c);
+        }
+    }
+    static void xmark(CCDrawNode* n, CCPoint p, ccColor4F c) {
+        n->drawSegment(p + ccp(-5, -5), p + ccp(5, 5), 1.4f, c);
+        n->drawSegment(p + ccp(-5, 5), p + ccp(5, -5), 1.4f, c);
+    }
+
+    void redrawPaths() {
+        auto f = m_fields.self();
+        if (!f->paths) return;
+        f->paths->clear();
+        f->paths->setVisible(s_enabled && s_training);
+        f->live->setVisible(s_enabled && s_training);
+        if (!s_enabled || !s_training) return;
+        auto& b = this->brain();
+        int n = (int)b.oldPaths.size();
+        for (int i = 0; i < n; i++) {                   // older generations: faded, blue to purple
+            float t = n > 1 ? (float)i / (n - 1) : 1.f;
+            polyline(f->paths, b.oldPaths[i], 1.2f, ccc4f(0.49f + 0.22f * t, 0.78f - 0.17f * t, 1.f, 0.25f + 0.3f * t));
+        }
+        for (auto& d : b.deaths) xmark(f->paths, d, ccc4f(1.f, 0.42f, 0.42f, 0.75f));
+        polyline(f->paths, b.bestPath, 2.2f, ccc4f(0.96f, 0.64f, 0.71f, 1.f));
+        for (auto& c : b.bestClicks) { f->paths->drawDot(c, 3.2f, ccc4f(0.14f, 0.13f, 0.11f, 1.f)); f->paths->drawDot(c, 2.4f, ccc4f(1.f, 0.88f, 0.29f, 1.f)); }
+    }
+
+    void updateTraining(float dt) {
+        auto f = m_fields.self();
+        auto& b = this->brain();
+        if (f->live && s_training && m_player1 && !m_player1->m_isDead) {
+            auto here = this->playerPos();
+            if (f->cur.empty() || ccpDistance(f->cur.back(), here) > 4.f) {
+                if (!f->cur.empty() && (f->cur.size() / 3) % 2 == 0) f->live->drawSegment(f->cur.back(), here, 1.1f, ccc4f(1, 1, 1, 0.75f));
+                f->cur.push_back(here);
+            }
+        }
+        // generation panel (bottom left of the screen)
+        f->graph->clear();
+        f->genLabel->setVisible(s_training);
+        if (!s_training) return;
+        int inGen = b.attempts % perGen();
+        std::string g = "Generation " + std::to_string(b.gen + 1) + "   Attempt " + std::to_string(inGen == 0 ? perGen() : inGen) + "/" +
+            std::to_string(perGen()) + "   Best this gen " + std::to_string((int)b.genBestPct) + "%   Speed " +
+            std::to_string((int)SPEEDS[s_speedIdx]) + "x" + (b.skipUntil >= 0 ? "   Skipping to gen " + std::to_string(b.skipUntil + 1) + "..." : "");
+        f->genLabel->setString(g.c_str());
+        float gx = 12.f, gy = 14.f, gw = 160.f, gh = 22.f;
+        f->graph->drawRect(ccp(gx - 4, gy - 4), ccp(gx + gw + 4, gy + gh + 4), ccc4f(0, 0, 0, 0.35f), 0.f, ccc4f(0, 0, 0, 0));
+        auto& hist = b.genHistory;
+        for (size_t i = 1; i < hist.size(); i++) {
+            float x1 = gx + gw * (i - 1) / std::max<size_t>(1, hist.size() - 1), x2 = gx + gw * i / std::max<size_t>(1, hist.size() - 1);
+            f->graph->drawSegment(ccp(x1, gy + gh * hist[i - 1] / 100.f), ccp(x2, gy + gh * hist[i] / 100.f), 1.f, ccc4f(0.96f, 0.64f, 0.71f, 1.f));
+        }
+    }
+
+    // GD's own hitbox drawing, switched on while Coda plays
+    bool shouldDrawDebugHitboxes() {
+        if (s_enabled && s_hitboxes) return true;
+        return PlayLayer::shouldDrawDebugHitboxes();
+    }
+    bool shouldDrawHitboxTrail() {
+        if (s_enabled && s_trail) return true;
+        return PlayLayer::shouldDrawHitboxTrail();
+    }
+    bool shouldRecordHitboxTrail() {
+        if (s_enabled && s_trail) return true;
+        return PlayLayer::shouldRecordHitboxTrail();
+    }
+    void refreshDebugDraw() {
+        this->updateDebugDrawSettings();
+        if (m_debugDrawNode) m_debugDrawNode->setVisible(s_enabled && (s_hitboxes || s_trail) ? true : m_debugDrawNode->isVisible());
+        if (!(s_enabled && (s_hitboxes || s_trail)) && m_debugDrawNode && !PlayLayer::shouldDrawDebugHitboxes()) m_debugDrawNode->clear();
+    }
+
     void levelComplete() {
         auto f = m_fields.self();
         if (!f->used) return PlayLayer::levelComplete();
@@ -362,11 +525,16 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!s_enabled) return;
         this->updateIcon();
         this->updateHud(dt);
+        f->fpsTimer -= dt;
+        if (f->fpsTimer <= 0.f) { f->fpsTimer = 2.f; applyFps(); }
         if (m_player1 && !m_isPlatformer) {
             this->maybeCheckpoint();
+            this->updateTraining(dt);
             auto& b = this->brain();
             bool known = m_player1->m_position.x < b.bestX - 300.f && !m_player1->m_isDead;
-            CCDirector::get()->getScheduler()->setTimeScale(known ? mode().knownSpeed : mode().frontSpeed);
+            float speed = known ? mode().knownSpeed : mode().frontSpeed;
+            if (s_training) speed = b.skipUntil >= 0 ? SPEEDS[3] : SPEEDS[s_speedIdx];
+            CCDirector::get()->getScheduler()->setTimeScale(speed);
         }
     }
 
@@ -472,12 +640,25 @@ class $modify(GJBaseGameLayer) {
 class $modify(CodaPauseLayer, PauseLayer) {
     struct Fields {
         CCLabelBMFont* label = nullptr;
-        CCLabelBMFont* speed = nullptr;
+        std::vector<std::pair<CCLabelBMFont*, std::function<std::string()>>> texts;
     };
+
+    CCLabelBMFont* addText(CCMenu* menu, CCPoint pos, SEL_MenuHandler cb, std::function<std::string()> text) {
+        auto lbl = CCLabelBMFont::create(text().c_str(), "bigFont.fnt");
+        lbl->setScale(0.3f);
+        auto btn = CCMenuItemSpriteExtra::create(lbl, this, cb);
+        btn->setPosition(pos);
+        menu->addChild(btn);
+        m_fields->texts.push_back({lbl, text});
+        return lbl;
+    }
 
     void customSetup() {
         PauseLayer::customSetup();
         auto win = CCDirector::get()->getWinSize();
+        auto bg = CCLayerColor::create({0, 0, 0, 110}, 250.f, 118.f);
+        bg->setPosition({win.width - 258.f, 6.f});
+        this->addChild(bg, 49);
         auto menu = CCMenu::create();
         menu->setPosition({0, 0});
         this->addChild(menu, 50);
@@ -486,41 +667,87 @@ class $modify(CodaPauseLayer, PauseLayer) {
         if (face) face->setScale(1.4f);
         auto btn = CCMenuItemSpriteExtra::create(face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt"),
                                                  this, menu_selector(CodaPauseLayer::onCoda));
-        btn->setPosition({win.width - 42.f, 52.f});
+        btn->setPosition({win.width - 42.f, 60.f});
         menu->addChild(btn);
         m_fields->label = CCLabelBMFont::create("", "bigFont.fnt");
         m_fields->label->setScale(0.3f);
-        m_fields->label->setPosition({win.width - 42.f, 22.f});
+        m_fields->label->setPosition({win.width - 42.f, 26.f});
         this->addChild(m_fields->label, 50);
 
-        auto spd = CCLabelBMFont::create("", "bigFont.fnt");
-        spd->setScale(0.3f);
-        auto sbtn = CCMenuItemSpriteExtra::create(spd, this, menu_selector(CodaPauseLayer::onSpeed));
-        sbtn->setPosition({win.width - 140.f, 22.f});
-        menu->addChild(sbtn);
-        m_fields->speed = spd;
+        float cx = win.width - 165.f;
+        addText(menu, {cx, 112.f}, menu_selector(CodaPauseLayer::onMode), [] { return std::string("Learning: ") + mode().name; });
+        addText(menu, {cx, 94.f}, menu_selector(CodaPauseLayer::onTraining), [] { return std::string("Training: ") + (s_training ? "ON" : "OFF"); });
+        addText(menu, {cx, 76.f}, menu_selector(CodaPauseLayer::onSpeed), [] { return "Speed: " + std::to_string((int)SPEEDS[s_speedIdx]) + "x"; });
+        addText(menu, {cx - 52.f, 58.f}, menu_selector(CodaPauseLayer::onSkip1), [] { return std::string("+1 gen"); });
+        addText(menu, {cx + 4.f, 58.f}, menu_selector(CodaPauseLayer::onSkip5), [] { return std::string("+5"); });
+        addText(menu, {cx + 44.f, 58.f}, menu_selector(CodaPauseLayer::onSkip10), [] { return std::string("+10"); });
+        addText(menu, {cx, 40.f}, menu_selector(CodaPauseLayer::onHitboxes), [] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); });
+        addText(menu, {cx, 22.f}, menu_selector(CodaPauseLayer::onTrail), [] { return std::string("Trail: ") + (s_trail ? "ON" : "OFF"); });
         this->refresh();
     }
 
     void refresh() {
         if (m_fields->label) m_fields->label->setString(s_enabled ? "Coda: ON" : "Coda: OFF");
-        if (m_fields->speed) m_fields->speed->setString((std::string("Learning: ") + mode().name).c_str());
+        for (auto& [lbl, text] : m_fields->texts) lbl->setString(text().c_str());
+    }
+
+    CodaPlayLayer* pl() { return static_cast<CodaPlayLayer*>(PlayLayer::get()); }
+
+    void turnOn() {
+        if (s_enabled) return;
+        s_enabled = true;
+        if (auto p = pl()) p->codaStart();
     }
 
     void onCoda(CCObject*) {
-        s_enabled = !s_enabled;
-        if (auto pl = static_cast<CodaPlayLayer*>(PlayLayer::get())) {
-            if (s_enabled) pl->codaStart();
-            else pl->codaStop();
-        }
+        if (s_enabled) {
+            s_enabled = false;
+            if (auto p = pl()) p->codaStop();
+        } else this->turnOn();
+        if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
+        this->refresh();
+    }
+
+    void onMode(CCObject*) {
+        s_mode = (s_mode + 1) % 3;
+        if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
+        this->refresh();
+    }
+
+    void onTraining(CCObject*) {
+        s_training = !s_training;
+        if (s_training) this->turnOn();
+        if (auto p = pl()) p->redrawPaths();
         this->refresh();
     }
 
     void onSpeed(CCObject*) {
-        s_mode = (s_mode + 1) % 3;
-        if (auto pl = static_cast<CodaPlayLayer*>(PlayLayer::get())) {
-            if (s_enabled && !pl->m_isPlatformer) pl->m_fields->needApply = true;
+        s_speedIdx = (s_speedIdx + 1) % 4;
+        this->refresh();
+    }
+
+    void skip(int n) {
+        s_training = true;
+        this->turnOn();
+        if (auto p = pl()) {
+            auto& b = p->brain();
+            b.skipUntil = b.gen + n;
+            p->redrawPaths();
         }
+        this->refresh();
+    }
+    void onSkip1(CCObject*) { this->skip(1); }
+    void onSkip5(CCObject*) { this->skip(5); }
+    void onSkip10(CCObject*) { this->skip(10); }
+
+    void onHitboxes(CCObject*) {
+        s_hitboxes = !s_hitboxes;
+        if (auto p = pl()) p->refreshDebugDraw();
+        this->refresh();
+    }
+    void onTrail(CCObject*) {
+        s_trail = !s_trail;
+        if (auto p = pl()) p->refreshDebugDraw();
         this->refresh();
     }
 };

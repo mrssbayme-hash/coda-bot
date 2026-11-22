@@ -1,16 +1,63 @@
 {
-	"geode": "6.0.0-beta.1",
-	"gd": {
-		"win": "2.2091"
-	},
-	"id": "coda.coda-bot",
-	"name": "Coda Bot",
-	"version": "v1.0.0",
-	"developer": "Coda",
-	"description": "Coda learns your levels by himself. His runs never count: no completions, no verifying, no saved progress.",
-	"resources": {
-		"sprites": [
-			"resources/*.png"
-		]
-	}
+ "geode": "6.0.0-beta.1",
+ "gd": {
+  "win": "2.2091"
+ },
+ "id": "coda.coda-bot",
+ "name": "Coda Bot",
+ "version": "v1.2.0",
+ "developer": "Coda",
+ "description": "Coda learns your levels by himself. His runs never count: no completions, no verifying, no saved progress.",
+ "resources": {
+  "sprites": [
+   "resources/*.png"
+  ]
+ },
+ "settings": {
+  "fps-bypass": {
+   "type": "bool",
+   "name": "FPS bypass",
+   "description": "Let the game run above its normal FPS cap.",
+   "default": false
+  },
+  "fps": {
+   "type": "int",
+   "name": "FPS",
+   "description": "Target FPS when FPS bypass is on.",
+   "default": 240,
+   "min": 30,
+   "max": 1000,
+   "control": {
+    "arrows": true,
+    "arrow-step": 10,
+    "big-arrows": true,
+    "big-arrow-step": 60,
+    "input": true
+   }
+  },
+  "attempts-per-generation": {
+   "type": "int",
+   "name": "Attempts per generation",
+   "description": "How many attempts make up one generation in Training mode.",
+   "default": 10,
+   "min": 2,
+   "max": 50,
+   "control": {
+    "arrows": true,
+    "input": true
+   }
+  },
+  "old-paths": {
+   "type": "int",
+   "name": "Old generation paths",
+   "description": "How many past generations' best paths to keep on screen in Training mode.",
+   "default": 4,
+   "min": 0,
+   "max": 10,
+   "control": {
+    "arrows": true,
+    "input": true
+   }
+  }
+ }
 }
