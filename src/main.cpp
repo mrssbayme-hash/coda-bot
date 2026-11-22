@@ -49,7 +49,8 @@ struct Brain {
     bool examRun = false;                        // this attempt is the first full run of the final exam
     // Perfect: pathfinding. A decision every few units (hold or let go), each with a checkpoint
     // so he can back up and try the other choice when a branch dies.
-    struct Node { float x; bool press; unsigned char tried; bool cp; bool ground; float y; };
+    struct Node { float x; bool press; unsigned char tried; bool cp; bool ground; float y; void* cpObj = nullptr; };
+    int backups = 0;             // how many times he's backed up at this same spot (grows each time)
     std::vector<CCRect> orbs;    // orb hitboxes: the only places a mid-air click matters for cube/ball/robot/spider
     float sameX = -1e9f;         // where he keeps dying
     int sameCount = 0;
@@ -494,7 +495,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 prev = false;
                 for (auto& h : b.guide) if (h.start <= x && x < h.end) { prev = true; break; }
             }
-            if (b.routeMode && x < b.routeToX && !groundMode) {
+            if (false && b.routeMode && x < b.routeToX && !groundMode) {
                 // Taking a different route: steer toward the route's height by default.
                 float y = m_player1->m_position.y;
                 bool up = y < b.routeY;
@@ -506,12 +507,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
             auto made = this->markCheckpoint();
             int after = m_checkpointArray ? (int)m_checkpointArray->count() : -1;
             n.cp = made != nullptr && after > before;
+            n.cpObj = made;
             if (!n.cp) log::warn("[pf] checkpoint refused at x={:.1f} (array {} -> {})", x, before, after);
             int cps = 0;
             for (auto& o : b.nodes) if (o.cp) cps++;
             if (cps >= PF_WINDOW) {
-                this->removeCheckpoint(true);
-                for (auto& o : b.nodes) if (o.cp) { o.cp = false; break; }
+                for (auto& o : b.nodes) if (o.cp) { o.cp = false; break; }   // too old to rewind to (left in place)
             }
             b.nodes.push_back(n);
             log::debug("[pf] node #{} x={:.1f} y={:.1f} ground={} press={} gdCps={}", b.nodes.size(), x, n.y, n.ground, n.press,
@@ -525,6 +526,15 @@ class $modify(CodaPlayLayer, PlayLayer) {
             f->held = want;
             if (want && s_training) f->curClicks.push_back(this->playerPos());
         }
+    }
+
+    // Make GD's newest checkpoint exactly this decision's checkpoint, so the respawn lands there.
+    // (GD can add checkpoints of its own, so remove by identity, not by counting.)
+    void rewindTo(Brain::Node const& n) {
+        if (!m_checkpointArray || !n.cpObj) return;
+        if (!m_checkpointArray->containsObject(static_cast<CCObject*>(n.cpObj))) { log::warn("[pf] checkpoint for x={:.1f} is gone", n.x); return; }
+        int guard = 0;
+        while (m_checkpointArray->count() > 0 && m_checkpointArray->lastObject() != n.cpObj && guard++ < 2000) this->removeCheckpoint(false);
     }
 
     // A branch died: rewind to the latest decision that still has an untried choice.
@@ -541,78 +551,59 @@ class $modify(CodaPlayLayer, PlayLayer) {
             this->m_fields->smugTime = 1.f;
         }
         if (std::abs(x - b.sameX) < 30.f) b.sameCount++;
-        else { b.sameX = x; b.sameCount = 1; }
+        else { b.sameX = x; b.sameCount = 1; b.backups = 0; }
+        if (x > b.bestX - 1.f && b.sameCount == 1) b.backups = 0;
+
         int im = m_player1 ? this->iconOf(m_player1) : 0;
         bool flying = im == 1 || im == 3 || im == 4 || im == 5 || im == 7;   // ship, UFO, wave, robot, swing
-        if (b.sameCount >= 10 && flying) {
-            // Flying: the mistake usually happened well before the thing he hits (momentum).
-            // Back up in steps (ship: 130, then 180, 260, 360). If he's still stuck after all of those,
-            // take a different route: go back further and fly a high or low line into the same area.
+        if (b.sameCount >= 10) {
+            // Stuck on one spot: back up a bit, and a bit further every time he's still stuck here.
+            //  flying (ship 130, 180, 260, 360, 460...)   ground (takeoff, then 90, 150, 220, 300, 400...)
             b.sameCount = 0;
-            static float const SHIP[] = {130.f, 180.f, 260.f, 360.f};
-            static float const WAVE[] = {90.f, 120.f, 180.f, 260.f};
-            static float const OTHER[] = {110.f, 150.f, 220.f, 320.f};
-            float const* steps = im == 1 ? SHIP : im == 4 ? WAVE : OTHER;
-            bool newRoute = b.flyBackups >= 4;
-            float back = newRoute ? steps[3] + 120.f : steps[b.flyBackups];
-            b.flyBackups = newRoute ? 0 : b.flyBackups + 1;
-            float target = x - back;
-            int i = (int)b.nodes.size() - 1;
-            while (i > 0 && b.nodes[i].x > target) i--;
-            while (i > 0 && b.nodes[i].tried == 3 && !newRoute) i--;
-            if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp) {
-                while ((int)b.nodes.size() > i + 1) { bool hc = b.nodes.back().cp; b.nodes.pop_back(); if (hc) this->removeCheckpoint(false); }
-                auto& n = b.nodes.back();
-                if (newRoute) {
-                    b.routeTries++;
-                    b.routeMode = (b.routeTries % 2) ? 1 : 2;
-                    b.routeY = n.y + (b.routeMode == 1 ? 75.f : -75.f);
-                    b.routeToX = x + 60.f;
-                    n.tried = 0;                         // a new route: every choice from here is open again
-                    bool up = b.routeMode == 1;
-                    n.press = m_player1 && m_player1->m_isUpsideDown ? !up : up;
-                    n.tried |= n.press ? 2 : 1;
-                    s_thought = std::string("Same spot again. Going back ") + std::to_string((int)(x - n.x)) + " units and trying the " +
-                                (b.routeMode == 1 ? "high" : "low") + " route.";
-                    return;
-                }
-                if (n.tried != 3) {
-                    n.press = !(n.tried & 2);
-                    n.tried |= n.press ? 2 : 1;
-                    s_thought = "Keep hitting the same thing. Backing up " + std::to_string((int)(x - n.x)) + " units and flying it differently.";
-                    return;
-                }
+            int k = b.backups++;
+            float back;
+            if (flying) {
+                static float const SHIP[] = {130.f, 180.f, 260.f, 360.f};
+                static float const WAVE[] = {90.f, 120.f, 180.f, 260.f};
+                static float const OTHER[] = {110.f, 150.f, 220.f, 320.f};
+                float const* st = im == 1 ? SHIP : im == 4 ? WAVE : OTHER;
+                back = k < 4 ? st[k] : st[3] + 100.f * (k - 3);
+            } else {
+                static float const GROUND[] = {0.f, 90.f, 150.f, 220.f, 300.f};
+                back = k < 5 ? GROUND[k] : 300.f + 100.f * (k - 4);
             }
-        }
-        if (b.sameCount >= 10 && !flying) {
-            // Died 10 times on the same jump: go back to where he last stood on the ground before it
-            // (the takeoff) and rethink from there.
-            b.sameCount = 0;
-            size_t i = b.nodes.size();
-            while (i > 0 && !b.nodes[i - 1].ground) i--;          // skip mid-air choices (orbs)
-            if (i > 0) i--;                                       // the takeoff itself
-            while (i > 0 && b.nodes[i].tried == 3) i--;           // earlier ground choices if the takeoff is used up
-            if (i < b.nodes.size() && b.nodes[i].cp && b.nodes[i].tried != 3) {
-                while (b.nodes.size() > i + 1) { bool hc = b.nodes.back().cp; b.nodes.pop_back(); if (hc) this->removeCheckpoint(false); }
+            int i = (int)b.nodes.size() - 1;
+            if (!flying && k == 0) {
+                while (i > 0 && !b.nodes[i].ground) i--;           // the takeoff for this jump
+                if (i > 0) i--;
+            } else {
+                while (i > 0 && b.nodes[i].x > x - back) i--;
+            }
+            while (i > 0 && (!b.nodes[i].cp || (!flying && !b.nodes[i].ground))) i--;   // somewhere he can respawn
+            if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp) {
+                b.nodes.resize(i + 1);
                 auto& n = b.nodes.back();
-                n.press = !(n.tried & 2);
+                n.tried = 0;                                       // a fresh look from here
+                n.press = !n.press;                                // do the opposite of last time here
                 n.tried |= n.press ? 2 : 1;
-                s_thought = "Died 10 times on this jump. Going back to where I took off and trying " + std::string(n.press ? "jumping there." : "waiting there.");
+                this->rewindTo(n);
+                s_thought = "Stuck here " + std::to_string((k + 1) * 10) + " times. Backing up " + std::to_string((int)(x - n.x)) +
+                            " units and trying " + (n.press ? (flying ? "flying up" : "jumping") : (flying ? "dropping" : "waiting")) + " there.";
                 return;
             }
         }
+        // Normal search: go back to the latest decision that still has a choice left.
         while ((s_pathOnly || b.pfDeaths <= 900) && !b.nodes.empty()) {
             auto& n = b.nodes.back();
             if (!n.cp) { b.nodes.pop_back(); continue; }   // no checkpoint here: can't respawn at it
             if (n.tried != 3) {
                 n.press = !(n.tried & 2) ? true : false;   // try the choice not tried yet
                 n.tried |= n.press ? 2 : 1;
+                this->rewindTo(n);
                 s_thought = "That branch died. Going back " + std::to_string((int)(x - n.x)) + " units and trying " + (n.press ? "holding." : "letting go.");
-                return;                                    // GD respawns at this decision's checkpoint
+                return;
             }
-            bool hadCp = b.nodes.back().cp;
             b.nodes.pop_back();
-            if (hadCp) this->removeCheckpoint(false);
         }
         if ((!s_pathOnly && b.pfDeaths > 900) || b.nodes.empty() || !b.nodes.back().cp) {
             // Every choice within reach dies: the real mistake is further back. Learn it the slow way.
