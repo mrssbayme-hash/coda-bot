@@ -86,11 +86,18 @@ namespace hacks {
     }
 
     // ------------------------------------------------------------ speedhack
+    // The whole game's sound goes through FMOD's master channel group, so changing its pitch
+    // speeds up the level song, the practice song and the sound effects together.
     void applySpeedAudio() {
         auto fmod = FMODAudioEngine::sharedEngine();
-        if (!fmod || !fmod->m_globalChannel) return;
-        float pitch = (V::speedhack && V::speedAudio) ? V::speed : 1.f;
-        fmod->m_globalChannel->setPitch(pitch);
+        if (!fmod || !fmod->m_system) return;
+        float pitch = (V::speedhack && V::speedAudio) ? std::clamp(V::speed, .1f, 10.f) : 1.f;
+        FMOD::ChannelGroup* master = nullptr;
+        if (fmod->m_system->getMasterChannelGroup(&master) == FMOD_OK && master) {
+            float cur = 1.f;
+            master->getPitch(&cur);
+            if (std::abs(cur - pitch) > .0001f) master->setPitch(pitch);
+        }
     }
 
     // ------------------------------------------------------------ hitboxes
@@ -467,6 +474,7 @@ class $modify(HackGameManager, GameManager) {
 class $modify(HackScheduler, CCScheduler) {
     void update(float dt) {
         if (V::speedhack) dt *= std::clamp(V::speed, .1f, 10.f);
+        applySpeedAudio();      // keep the music in step, even after GD starts a new song
         CCScheduler::update(dt);
     }
 };

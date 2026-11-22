@@ -26,7 +26,7 @@ namespace {
     ImFont* s_body = nullptr;
     ImFont* s_title = nullptr;
 
-    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Coda"};
+    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Keybinds", "Coda"};
 
     ImU32 col(Col const& c, float alphaMul = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, c.a * alphaMul)); }
     ImVec4 v4(Col const& c, float a = -1.f) { return ImVec4(c.r, c.g, c.b, a < 0.f ? c.a : a); }
@@ -272,20 +272,6 @@ namespace {
 
     void codaExtras() {
         ImGui::Separator();
-        if (ImGui::CollapsingHeader("Keybinds")) {
-            for (auto& f : cfg::all()) {
-                if (f.type != cfg::T::Action && !(f.type == cfg::T::Bool && f.bind)) continue;
-                ImGui::PushID(f.key.c_str());
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(f.label.c_str());
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x * .58f + ImGui::GetCursorPosX() * 0.f);
-                bool waiting = cfg::waitingBind == &f;
-                if (ImGui::Button(waiting ? "Press a key" : cfg::keyName(f.bind).c_str(), ImVec2(-FLT_MIN, 0))) cfg::waitingBind = &f;
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { f.bind = 0; cfg::save(); }
-                ImGui::PopID();
-            }
-            ImGui::TextDisabled("Click a key to change it. Right-click to clear.\nRight-click any toggle to give it a key.");
-        }
         if (ImGui::Button("Reset window layout", ImVec2(-FLT_MIN, 0))) s_resetLayout = true;
         if (!s_confirmReset) { if (ImGui::Button("Reset all settings", ImVec2(-FLT_MIN, 0))) s_confirmReset = true; }
         else {
@@ -293,6 +279,41 @@ namespace {
             if (ImGui::Button("Yes, reset", ImVec2(ImGui::GetContentRegionAvail().x / 2 - 2, 0))) { cfg::resetAll(); s_confirmReset = false; menu::notify("Settings reset"); }
             ImGui::SameLine(0, 4);
             if (ImGui::Button("Cancel", ImVec2(-FLT_MIN, 0))) s_confirmReset = false;
+        }
+    }
+
+    void keyButton(cfg::Field& f) {
+        ImGui::PushID(f.key.c_str());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(f.label.c_str());
+        ImGui::SameLine();
+        float bw = 92.f * V::menuScale;
+        float rem = ImGui::GetContentRegionAvail().x;
+        if (rem > bw) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + rem - bw);
+        bool waiting = cfg::waitingBind == &f;
+        if (waiting) ImGui::PushStyleColor(ImGuiCol_Button, v4(V::accent, 1.f));
+        if (ImGui::Button(waiting ? "Press a key" : cfg::keyName(f.bind).c_str(), ImVec2(bw, 0))) cfg::waitingBind = waiting ? nullptr : &f;
+        if (waiting) ImGui::PopStyleColor();
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { f.bind = 0; cfg::save(); }
+        ImGui::PopID();
+    }
+
+    void keybindsWindow() {
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("Click a button, then press the key you want. Right-click a button to clear it. Esc clears too.");
+        ImGui::PopTextWrapPos();
+        bool searching = s_search[0] != 0;
+        if (!searching) ImGui::SeparatorText("Menu and actions");
+        for (auto& f : cfg::all()) if (f.type == cfg::T::Action && matches(f)) keyButton(f);
+        for (char const* w : {"Player", "Level", "Bypass", "Coda Bot", "Labels"}) {
+            bool header = false;
+            for (auto& f : cfg::all()) {
+                if (f.win != w || f.type != cfg::T::Bool || !matches(f)) continue;
+                if (!header && !searching) { ImGui::SeparatorText(w); header = true; }
+                if (!f.parent.empty() && !searching) ImGui::Indent(10.f);
+                keyButton(f);
+                if (!f.parent.empty() && !searching) ImGui::Unindent(10.f);
+            }
         }
     }
 
@@ -319,9 +340,11 @@ namespace {
             if (x + winW > io.DisplaySize.x - 8.f && i > 0) { x = 16.f; y += 340.f * scale; }
             ImVec2 def(x, y);
             x += winW + 12.f;
-            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0) continue;
+            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0) continue;
             ImGui::SetNextWindowPos(def, s_resetLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSizeConstraints(ImVec2(winW, 0.f), ImVec2(winW, io.DisplaySize.y - 20.f));
+            bool kbWin = std::strcmp(name, "Keybinds") == 0;
+            if (kbWin) ImGui::SetNextWindowSizeConstraints(ImVec2(winW * 1.15f, 120.f), ImVec2(winW * 1.15f, io.DisplaySize.y * .7f));
             ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | (closing ? ImGuiWindowFlags_NoInputs : 0);
             if (s_title) ImGui::PushFont(s_title, 0.f);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.137f, .125f, .11f, 1.f));
@@ -331,7 +354,8 @@ namespace {
             if (open) {
                 if (std::strcmp(name, "Coda Bot") == 0 && !s_search[0]) botControls();
                 if (std::strcmp(name, "Coda") == 0 && !s_search[0]) codaStatus();
-                drawFields(name);
+                if (std::strcmp(name, "Keybinds") == 0) keybindsWindow();
+                else drawFields(name);
                 if (std::strcmp(name, "Bypass") == 0 && !hacks::tpsSupported())
                     ImGui::TextColored(ImVec4(1.f, .6f, .4f, 1.f), "TPS bypass needs Steam GD 2.2091.");
                 if (std::strcmp(name, "Coda") == 0 && !s_search[0]) codaExtras();
@@ -503,6 +527,7 @@ class $modify(MenuKeys, CCKeyboardDispatcher) {
         if (down && !repeat) {
             if (cfg::waitingBind) {
                 cfg::waitingBind->bind = key == KEY_Escape ? 0 : (int)key;
+                menu::notify(cfg::waitingBind->label + ": " + cfg::keyName(cfg::waitingBind->bind));
                 cfg::waitingBind = nullptr;
                 cfg::save();
                 return true;
