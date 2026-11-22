@@ -4,10 +4,13 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/EnhancedGameObject.hpp>
 #include <random>
 #include <deque>
 #include <functional>
 #include <chrono>
+#include <unordered_set>
 #include <algorithm>
 
 using namespace geode::prelude;
@@ -46,6 +49,8 @@ struct Brain {
     std::vector<Node> nodes;
     bool pfFailed = false;
     int pfDeaths = 0;
+    bool planDone = false;      // Perfect: the planner already ran on this level
+    bool planFailed = false;    // ...and couldn't reach the end, so use pathfinding instead
 };
 static float const PF_STEP = 12.f;     // units between decisions
 static int const PF_WINDOW = 48;       // how many decisions back he can rewind
@@ -77,6 +82,14 @@ static bool s_auto = false;        // auto train: turbo until he beats it
 static int s_modeBeforeAuto = 1;
 static float s_turbo = 20.f;       // adapts to how fast the PC can keep up
 static bool s_hitboxes = false;
+// planner simulation: while s_sim is on, the game is moving an invisible copy of the player
+static bool s_sim = false;
+static bool s_ghostDead = false;
+static bool s_ghostDone = false;
+static PlayerObject* s_simGhost = nullptr;
+static std::unordered_set<GameObject*>* s_simActivated = nullptr;
+static int const PLAN_BEAM = 14;      // how many candidate runs he keeps at once
+static int const PLAN_STEPS = 8;      // physics steps per decision (1/30 s)
 static bool s_trail = false;
 static int perGen() { return std::max(1, (int)Mod::get()->getSettingValue<int64_t>("attempts-per-generation")); }
 static int oldPathCount() { return std::max(0, (int)Mod::get()->getSettingValue<int64_t>("old-paths")); }
@@ -86,7 +99,7 @@ static void applyFps() {
     CCDirector::get()->setAnimationInterval(1.0 / fps);
 }
 static Mode const& mode() { return MODES[s_mode]; }
-static bool pathfinding(Brain const& b) { return mode().perfect && !b.finalExam && !b.pfFailed; }
+static bool pathfinding(Brain const& b) { return mode().perfect && b.planFailed && !b.finalExam && !b.pfFailed; }
 static std::vector<Hold> holdsFrom(std::vector<Brain::Node> const& nodes) {
     std::vector<Hold> out;
     for (size_t i = 0; i < nodes.size(); i++) {
@@ -196,6 +209,24 @@ class $modify(CodaPlayLayer, PlayLayer) {
         CCDrawNode* graph = nullptr;
         CCLabelBMFont* genLabel = nullptr;
         float fpsTimer = 0.f;
+        // planner
+        struct PNode { int parent; bool press; float x0; CCPoint end; };
+        struct BeamE { int node; PlayerObject* g; float clear; bool held; std::unordered_set<GameObject*> act; };
+        bool needPlan = false;
+        bool planning = false;
+        float planShow = 0.f;            // seconds left showing the finished plan
+        std::vector<PlayerObject*> pool;
+        std::vector<PlayerObject*> freeGhosts;
+        std::vector<PNode> arena;
+        std::vector<BeamE> beam;
+        std::vector<CCRect> hazards;
+        std::vector<std::pair<CCPoint, CCPoint>> tries;
+        std::vector<CCPoint> planPath;
+        std::vector<CCPoint> planClicks;
+        int checked = 0;
+        float planX = 0.f;
+        float planClear = 0.f;
+        CCDrawNode* planNode = nullptr;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -273,9 +304,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->removeAllCheckpoints();
         b.cpX = 0.f;
         if (!mode().perfect && b.finalExam) { b.finalExam = false; b.examRun = false; b.noCpBefore = 0.f; }
-        if (!mode().perfect) { b.pfFailed = false; b.nodes.clear(); }
+        if (!mode().perfect) { b.pfFailed = false; b.nodes.clear(); b.planDone = false; b.planFailed = false; }
         bool practice = mode().checkpoints && !b.finalExam;
-        b.confirm = practice && b.bestX > 0.f;
+        if (mode().perfect && !b.planDone) { practice = false; m_fields->needPlan = true; }
+        if (mode().perfect && b.planDone && !b.planFailed) practice = false;
+        b.confirm = practice && b.bestX > 0.f && !mode().perfect;
         if (pathfinding(b)) { b.nodes.clear(); b.confirm = false; b.pfDeaths = 0; }
         if (m_isPracticeMode != practice) this->togglePracticeMode(practice);
     }
@@ -315,6 +348,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void codaStep() {
         auto f = m_fields.self();
         if (!s_enabled || m_isPlatformer || !m_player1 || m_player1->m_isDead) return;
+        if (f->planning || f->planShow > 0.f) return;
         float x = m_player1->m_position.x;
         auto& b = this->brain();
         if (pathfinding(b) && m_isPracticeMode) { this->pfStep(x); return; }
@@ -424,6 +458,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
+        if (s_sim) { if (player == s_simGhost) s_ghostDead = true; return; }
         if (s_enabled && !m_isPlatformer && player == m_player1 && object != m_anticheatSpike && !player->m_isDead) {
             this->onCodaDeath(player->m_position.x, this->getCurrentPercent());
         }
@@ -587,6 +622,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // GD's own hitbox drawing, switched on while Coda plays
     bool shouldDrawDebugHitboxes() {
         if (s_enabled && s_hitboxes) return true;
+        if (s_enabled && (m_fields->planning || m_fields->planShow > 0.f)) return true;
         return PlayLayer::shouldDrawDebugHitboxes();
     }
     bool shouldDrawHitboxTrail() {
@@ -626,7 +662,226 @@ class $modify(CodaPlayLayer, PlayLayer) {
         say("Auto train done: beaten in " + std::to_string(b.attempts) + " attempts, " + std::to_string(b.gen) + " generations. (Doesn't count.)", 5.f);
     }
 
+
+    // ============================================================ the planner
+    // Reads every hazard hitbox, then simulates an invisible copy of the player with the game's own
+    // physics. At every decision (1/30 s) each candidate run branches into "hold" and "let go";
+    // runs that hit something are dropped, and he keeps the ones that stay furthest from hazards.
+    // The surviving run that reaches the end is the plan.
+
+    CCPoint ghostPos(PlayerObject* g) {
+        if (!g->getParent() || !m_objectLayer) return g->getPosition();
+        return m_objectLayer->convertToNodeSpace(g->getParent()->convertToWorldSpace(g->getPosition()));
+    }
+
+    PlayerObject* acquireGhost() {
+        auto f = m_fields.self();
+        if (!f->freeGhosts.empty()) { auto g = f->freeGhosts.back(); f->freeGhosts.pop_back(); return g; }
+        auto g = PlayerObject::create(1, 1, this, m_objectLayer, true);
+        if (!g) return nullptr;
+        if (m_player1 && m_player1->getParent()) m_player1->getParent()->addChild(g, -100);
+        g->setVisible(false);
+        f->pool.push_back(g);
+        return g;
+    }
+    void releaseGhost(PlayerObject* g) { if (g) m_fields->freeGhosts.push_back(g); }
+
+    static void copyState(PlayerObject* src, PlayerObject* dst) {
+        dst->copyAttributes(src);
+        dst->setPosition(src->getPosition());
+        dst->setRotation(src->getRotation());
+        dst->m_position = src->m_position;
+        dst->m_yVelocity = src->m_yVelocity;
+        dst->m_isOnGround = src->m_isOnGround;
+        dst->m_isUpsideDown = src->m_isUpsideDown;
+        dst->m_isShip = src->m_isShip; dst->m_isBird = src->m_isBird; dst->m_isBall = src->m_isBall;
+        dst->m_isDart = src->m_isDart; dst->m_isRobot = src->m_isRobot; dst->m_isSpider = src->m_isSpider;
+        dst->m_isSwing = src->m_isSwing;
+        dst->m_vehicleSize = src->m_vehicleSize;
+        dst->m_playerSpeed = src->m_playerSpeed;
+        dst->m_gravityMod = src->m_gravityMod;
+        dst->m_isOnSlope = src->m_isOnSlope;
+        dst->m_wasOnSlope = src->m_wasOnSlope;
+        dst->m_jumpBuffered = src->m_jumpBuffered;
+        dst->m_stateJumpBuffered = src->m_stateJumpBuffered;
+        dst->m_isDashing = src->m_isDashing;
+        dst->m_fallSpeed = src->m_fallSpeed;
+        dst->m_isAccelerating = src->m_isAccelerating;
+        dst->m_isSideways = src->m_isSideways;
+        dst->m_isGoingLeft = src->m_isGoingLeft;
+        dst->m_lastGroundedPos = src->m_lastGroundedPos;
+        dst->m_platformerXVelocity = src->m_platformerXVelocity;
+        dst->m_holdingButtons = src->m_holdingButtons;
+        dst->m_isDead = false;
+    }
+
+    float clearance(CCRect const& r) {
+        auto& hz = m_fields->hazards;
+        float best = 1e9f;
+        auto it = std::lower_bound(hz.begin(), hz.end(), r.getMinX() - 90.f,
+            [](CCRect const& a, float x) { return a.getMinX() < x; });
+        for (; it != hz.end() && it->getMinX() < r.getMaxX() + 90.f; ++it) {
+            float dx = std::max({0.f, it->getMinX() - r.getMaxX(), r.getMinX() - it->getMaxX()});
+            float dy = std::max({0.f, it->getMinY() - r.getMaxY(), r.getMinY() - it->getMaxY()});
+            best = std::min(best, std::sqrt(dx * dx + dy * dy));
+        }
+        return best;
+    }
+
+    bool simSegment(PlayerObject* g, bool press, bool& held, std::unordered_set<GameObject*>& act, float& clear) {
+        s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
+        if (press != held) {
+            if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
+            held = press;
+        }
+        for (int i = 0; i < PLAN_STEPS; i++) {
+            g->update(0.25f);
+            this->checkCollisions(g, 0.25f, false);
+            if (s_ghostDead || g->m_isDead) break;
+            g->updateRotation(0.25f);
+            clear = std::min(clear, this->clearance(g->getObjectRect()));
+            if (g->m_position.x >= m_levelLength) { s_ghostDone = true; break; }
+        }
+        bool alive = !s_ghostDead && !g->m_isDead;
+        s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr;
+        return alive;
+    }
+
+    void startPlanning() {
+        auto f = m_fields.self();
+        f->needPlan = false;
+        if (!m_player1 || !m_objects) return;
+        f->hazards.clear();
+        for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+            if (obj && obj->m_objectType == GameObjectType::Hazard) f->hazards.push_back(obj->getObjectRect());
+        }
+        std::sort(f->hazards.begin(), f->hazards.end(), [](CCRect const& a, CCRect const& b) { return a.getMinX() < b.getMinX(); });
+        f->arena.clear(); f->beam.clear(); f->tries.clear(); f->planPath.clear(); f->planClicks.clear();
+        f->checked = 0; f->planX = 0.f;
+        auto g = this->acquireGhost();
+        if (!g) { this->planFinished(-1); return; }
+        copyState(m_player1, g);
+        f->beam.push_back({-1, g, 1e9f, false, {}});
+        f->planning = true;
+        if (!f->planNode && m_objectLayer) { f->planNode = CCDrawNode::create(); m_objectLayer->addChild(f->planNode, 9002); }
+        this->refreshDebugDraw();
+        say("Reading the level...", 1.5f);
+    }
+
+    void planChunk() {
+        using clock = std::chrono::steady_clock;
+        auto f = m_fields.self();
+        auto until = clock::now() + std::chrono::milliseconds(12);
+        while (f->planning && clock::now() < until) {
+            std::vector<Fields::BeamE> kids;
+            int finished = -1; float finishedClear = -1.f;
+            for (auto& e : f->beam) {
+                for (int choice = 0; choice < 2; choice++) {
+                    bool press = choice == 1;
+                    auto g = this->acquireGhost();
+                    if (!g) continue;
+                    copyState(e.g, g);
+                    Fields::BeamE c{e.node, g, e.clear, e.held, e.act};
+                    float x0 = g->m_position.x;
+                    CCPoint p0 = this->ghostPos(g);
+                    bool alive = this->simSegment(g, press, c.held, c.act, c.clear);
+                    CCPoint p1 = this->ghostPos(g);
+                    f->checked++;
+                    if (f->tries.size() < 6000) f->tries.push_back({p0, p1});
+                    if (!alive) { this->releaseGhost(g); continue; }
+                    f->arena.push_back({e.node, press, x0, p1});
+                    c.node = (int)f->arena.size() - 1;
+                    if (s_ghostDone && c.clear > finishedClear) { finished = c.node; finishedClear = c.clear; }
+                    kids.push_back(std::move(c));
+                }
+            }
+            for (auto& e : f->beam) this->releaseGhost(e.g);
+            f->beam.clear();
+            if (finished >= 0) {
+                f->planClear = finishedClear;
+                for (auto& k : kids) this->releaseGhost(k.g);
+                this->planFinished(finished);
+                return;
+            }
+            if (kids.empty()) { this->planFinished(-1); return; }
+            // merge runs that ended up in the same spot, keep the safest
+            std::sort(kids.begin(), kids.end(), [](auto const& a, auto const& b) { return a.clear > b.clear; });
+            std::vector<Fields::BeamE> keep;
+            std::unordered_set<long long> seen;
+            for (auto& k : kids) {
+                auto* g = k.g;
+                long long key = ((long long)std::lround(g->m_position.y / 2.f) << 32) ^ ((long long)std::lround(g->m_yVelocity * 4.0) << 12) ^
+                                ((long long)this->iconOf(g) << 4) ^ ((long long)g->m_isUpsideDown << 2) ^ ((long long)k.held << 1) ^ (long long)g->m_isOnGround;
+                if ((int)keep.size() < PLAN_BEAM && seen.insert(key).second) { f->planX = std::max(f->planX, g->m_position.x); keep.push_back(std::move(k)); }
+                else this->releaseGhost(g);
+            }
+            f->beam = std::move(keep);
+        }
+    }
+
+    void planFinished(int node) {
+        auto f = m_fields.self();
+        auto& b = this->brain();
+        f->planning = false;
+        for (auto& e : f->beam) this->releaseGhost(e.g);
+        f->beam.clear();
+        b.planDone = true;
+        if (node < 0) {
+            b.planFailed = true;
+            float pct = m_levelLength > 0 ? 100.f * f->planX / m_levelLength : 0.f;
+            say("Couldn't plan past " + std::to_string((int)pct) + "%. Switching to pathfinding.", 3.f);
+            f->needApply = true;
+            return;
+        }
+        std::vector<int> chain;
+        for (int n = node; n >= 0; n = f->arena[n].parent) chain.push_back(n);
+        std::reverse(chain.begin(), chain.end());
+        std::vector<Hold> plan;
+        bool prev = false;
+        f->planPath.clear(); f->planClicks.clear();
+        f->planPath.push_back(this->playerPos());
+        for (size_t i = 0; i < chain.size(); i++) {
+            auto& n = f->arena[chain[i]];
+            float end = i + 1 < chain.size() ? f->arena[chain[i + 1]].x0 : n.x0 + PF_STEP;
+            if (n.press) {
+                if (!prev) f->planClicks.push_back(f->planPath.back());
+                if (prev && !plan.empty()) plan.back().end = end; else plan.push_back({n.x0, end});
+            }
+            prev = n.press;
+            f->planPath.push_back(n.end);
+        }
+        b.best = plan; b.trial = plan;
+        b.bestPath = f->planPath; b.bestClicks = f->planClicks;
+        b.bestX = m_levelLength; b.bestPct = 99.f;
+        b.finalExam = true; b.examRun = true; b.noCpBefore = 1e9f;
+        int clicks = (int)f->planClicks.size();
+        std::string clr = f->planClear > 1e8f ? "no hazards" : std::to_string((int)f->planClear) + " units";
+        say("Plan ready: " + std::to_string(clicks) + " clicks, closest call " + clr + ". Attempt 1.", 4.f);
+        f->planShow = 3.f;
+        this->drawPlan();
+    }
+
+    void drawPlan() {
+        auto f = m_fields.self();
+        if (!f->planNode) return;
+        f->planNode->clear();
+        if (!s_enabled || !mode().perfect) return;
+        for (auto& [a, b] : f->tries) f->planNode->drawSegment(a, b, 0.5f, ccc4f(0.81f, 0.84f, 1.f, 0.28f));
+        if (f->planPath.size() > 1) {
+            polyline(f->planNode, f->planPath, 5.f, ccc4f(0.49f, 0.94f, 0.66f, 0.18f));
+            polyline(f->planNode, f->planPath, 2.2f, ccc4f(0.96f, 0.64f, 0.71f, 1.f));
+        }
+        for (auto& c : f->planClicks) { f->planNode->drawDot(c, 3.4f, ccc4f(0.14f, 0.13f, 0.11f, 1.f)); f->planNode->drawDot(c, 2.6f, ccc4f(1.f, 0.88f, 0.29f, 1.f)); }
+    }
+
+    void cleanupGhosts() {
+        auto f = m_fields.self();
+        for (auto g : f->pool) if (g) g->removeFromParent();
+        f->pool.clear(); f->freeGhosts.clear(); f->beam.clear();
+    }
+
     void levelComplete() {
+        if (s_sim) { s_ghostDone = true; return; }
         auto f = m_fields.self();
         if (!f->used) return PlayLayer::levelComplete();
         // Blocked: no completion, no rewards, no verifying.
@@ -674,6 +929,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     void onQuit() {
+        this->cleanupGhosts();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
         PlayLayer::onQuit();
     }
@@ -683,7 +939,34 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         if (f->needApply) { f->needApply = false; if (s_enabled) this->applyMode(); f->needReset = true; }
         if (f->needReset) { f->needReset = false; this->resetLevel(); }
+        else if (f->needPlan && s_enabled && !m_isPlatformer) this->startPlanning();
         if (!s_enabled) return;
+        if (f->planning || f->planShow > 0.f) {
+            // the real level waits while he thinks
+            CCDirector::get()->getScheduler()->setTimeScale(0.f);
+            if (f->planning) {
+                this->planChunk();
+                float pct = m_levelLength > 0 ? 100.f * f->planX / m_levelLength : 0.f;
+                f->info->setString(("Planning... " + std::to_string((int)pct) + "%   " + std::to_string(f->checked) + " moves checked").c_str());
+                static int tick = 0;
+                if (++tick % 10 == 0) this->drawPlan();
+            } else {
+                using clock = std::chrono::steady_clock;
+                static auto last = clock::now();
+                auto now = clock::now();
+                float real = std::min(0.1f, std::chrono::duration<float>(now - last).count());
+                last = now;
+                f->planShow -= real;
+                if (f->planShow <= 0.f) {
+                    this->cleanupGhosts();
+                    this->refreshDebugDraw();
+                    CCDirector::get()->getScheduler()->setTimeScale(1.f);
+                    f->needReset = true;
+                }
+            }
+            this->updateIcon();
+            return;
+        }
         this->updateIcon();
         this->updateHud(dt);
         f->fpsTimer -= dt;
@@ -784,6 +1067,25 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
 // ---------------------------------------------------------------- input
 class $modify(GJBaseGameLayer) {
+    // While the planner simulates, the invisible player must not change anything in the real level.
+    void toggleGroupTriggered(int group, bool activate, std::vector<int> const& remapKeys, int triggerID, int controlID) {
+        if (s_sim) return;
+        GJBaseGameLayer::toggleGroupTriggered(group, activate, remapKeys, triggerID, controlID);
+    }
+    void spawnGroup(int group, bool ordered, double delay, std::vector<int> const& remapKeys, int triggerID, int controlID) {
+        if (s_sim) return;
+        GJBaseGameLayer::spawnGroup(group, ordered, delay, remapKeys, triggerID, controlID);
+    }
+    void pickupItem(EffectGameObject* object) { if (s_sim) return; GJBaseGameLayer::pickupItem(object); }
+    void destroyObject(GameObject* object) { if (s_sim) return; GJBaseGameLayer::destroyObject(object); }
+    void checkpointActivated(CheckpointGameObject* object) { if (s_sim) return; GJBaseGameLayer::checkpointActivated(object); }
+    void activateSFXTrigger(SFXTriggerGameObject* object) { if (s_sim) return; GJBaseGameLayer::activateSFXTrigger(object); }
+    void gameEventTriggered(GJGameEvent event, int material, int playerID) { if (s_sim) return; GJBaseGameLayer::gameEventTriggered(event, material, playerID); }
+    void lightningFlash(CCPoint from, CCPoint to, ccColor3B color, float lineWidth, float duration, int displacement, bool flash, float opacity) {
+        if (s_sim) return;
+        GJBaseGameLayer::lightningFlash(from, to, color, lineWidth, duration, displacement, flash, opacity);
+    }
+
     void handleButton(bool down, int button, bool isPlayer1) {
         auto pl = PlayLayer::get();
         if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_enabled && !pl->m_isPlatformer && !s_fromBot) {
@@ -796,6 +1098,26 @@ class $modify(GJBaseGameLayer) {
         auto pl = PlayLayer::get();
         if (pl && pl == static_cast<GJBaseGameLayer*>(this)) static_cast<CodaPlayLayer*>(pl)->codaStep();
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+    }
+};
+
+// ---------------------------------------------------------------- simulation guards
+class $modify(PlayerObject) {
+    void playSpiderDashEffect(CCPoint from, CCPoint to) { if (s_sim && this == s_simGhost) return; PlayerObject::playSpiderDashEffect(from, to); }
+    void spawnPortalCircle(ccColor3B color, float startRadius) { if (s_sim && this == s_simGhost) return; PlayerObject::spawnPortalCircle(color, startRadius); }
+    void incrementJumps() { if (s_sim && this == s_simGhost) return; PlayerObject::incrementJumps(); }
+};
+
+// Orbs, pads and touch triggers remember who used them. The invisible player keeps its own list,
+// so planning never "uses up" an orb for the real Coda.
+class $modify(EnhancedGameObject) {
+    void activatedByPlayer(PlayerObject* player) {
+        if (s_sim && player == s_simGhost) { if (s_simActivated) s_simActivated->insert(this); return; }
+        EnhancedGameObject::activatedByPlayer(player);
+    }
+    bool hasBeenActivatedByPlayer(PlayerObject* player) {
+        if (s_sim && player == s_simGhost) return s_simActivated && s_simActivated->count(this);
+        return EnhancedGameObject::hasBeenActivatedByPlayer(player);
     }
 };
 
