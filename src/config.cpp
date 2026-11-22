@@ -152,12 +152,18 @@ namespace cfg {
         add(B("noclip-p2", "Player 2", "Player", &noclipP2, "", "noclip"));
         add(B("noclip-flash", "Red flash on death", "Player", &noclipFlash, "", "noclip"));
         add(C("noclip-flash-color", "Flash color", "Player", &noclipFlashColor, "noclip"));
+        add(B("noclip-limit", "Death limit", "Player", &noclipLimit, "Restarts the attempt when noclip accuracy drops below the limit. Uses your respawn delay.", "noclip"));
+        add(F("noclip-limit-pct", "Lowest accuracy", "Player", &noclipLimitPct, 50.f, 100.f, "%.1f%%", "noclip-limit"));
         add(cheat(B("jump-hack", "Jump hack", "Player", &jumpHack, "Jump in mid-air. Hold to keep jumping.")));
         add(B("no-death-effect", "No death effect", "Player", &noDeathEffect));
-        add(B("respawn-delay", "Respawn delay", "Player", &respawnDelayOn, "Change how long you wait after dying. 0 is instant."));
-        add(F("respawn-delay-s", "Seconds", "Player", &respawnDelay, 0.f, 3.f, "%.2f s", "respawn-delay"));
+        add(B("respawn-delay", "Respawn delay", "Player", &respawnDelayOn, "Change how long it takes to load the next attempt, in milliseconds. 0 skips the wait."));
+        add(I("respawn-delay-ms", "Milliseconds", "Player", &respawnDelayMs, 0, 5000, "respawn-delay", true));
         add(B("no-respawn-blink", "No respawn blink", "Player", &noRespawnBlink));
         add(B("hide-player", "Hide player", "Player", &hidePlayer));
+        add(B("click-sounds", "Click sounds", "Player", &clickSounds, "Plays a click every time you (or the bot) press."));
+        add(Ch("click-style", "Sound", "Player", &clickStyle, {"Mouse", "Soft", "Coda"}, "click-sounds"));
+        add(F("click-volume", "Volume", "Player", &clickVolume, 0.f, 1.f, "%.2f", "click-sounds"));
+        add(B("click-release", "Release sound too", "Player", &clickRelease, "", "click-sounds"));
         add(on(cheat(B("hitboxes", "Show hitboxes", "Player", &hitboxes, "Doesn't count as a cheat in practice mode."),
             [] { auto pl = PlayLayer::get(); return V::hitboxes && !(pl && pl->m_isPracticeMode); }), [] { hacks::refreshHitboxes(); }));
         add(on(B("hitboxes-death", "Only on death", "Player", &hitboxesOnDeath, "", "hitboxes"), [] { hacks::refreshHitboxes(); }));

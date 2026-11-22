@@ -49,7 +49,12 @@ namespace V {
     inline Col noclipFlashColor{1.f, .15f, .2f, .35f};
     inline bool jumpHack = false;
     inline bool noDeathEffect = false, respawnDelayOn = false, noRespawnBlink = false, hidePlayer = false;
-    inline float respawnDelay = .5f;
+    inline int respawnDelayMs = 500;
+    inline bool noclipLimit = false;
+    inline float noclipLimitPct = 90.f;
+    inline bool clickSounds = false, clickRelease = true;
+    inline int clickStyle = 0;
+    inline float clickVolume = .7f;
     inline bool hitboxes = false, hitboxesOnDeath = false, hitboxTrail = false;
     inline bool hitboxAccurate = true, hitboxHideRotated = true, hitboxFill = false;
     inline int hitboxTrailLen = 240;

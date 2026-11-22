@@ -198,6 +198,28 @@ namespace hacks {
         return o->m_objectType == GameObjectType::Decoration;
     }
 
+    // ------------------------------------------------------------ click sounds
+    static FMOD::Sound* s_sounds[3][2] = {};
+    static bool s_soundsTried = false;
+    static void playClick(bool down) {
+        if (!V::clickSounds || (!down && !V::clickRelease)) return;
+        auto fmod = FMODAudioEngine::sharedEngine();
+        if (!fmod || !fmod->m_system) return;
+        if (!s_soundsTried) {
+            s_soundsTried = true;
+            char const* names[3] = {"click", "soft", "coda"};
+            for (int i = 0; i < 3; i++) for (int k = 0; k < 2; k++) {
+                auto path = (Mod::get()->getResourcesDir() / (std::string(names[i]) + (k ? "-release.wav" : "-press.wav"))).string();
+                if (fmod->m_system->createSound(path.c_str(), FMOD_DEFAULT | FMOD_CREATESAMPLE, nullptr, &s_sounds[i][k]) != FMOD_OK) s_sounds[i][k] = nullptr;
+            }
+            if (!s_sounds[0][0]) menu::notify("Couldn't load the click sounds");
+        }
+        auto snd = s_sounds[std::clamp(V::clickStyle, 0, 2)][down ? 0 : 1];
+        if (!snd) return;
+        FMOD::Channel* ch = nullptr;
+        if (fmod->m_system->playSound(snd, fmod->m_globalChannel, false, &ch) == FMOD_OK && ch) ch->setVolume(std::clamp(V::clickVolume, 0.f, 1.f));
+    }
+
     // ------------------------------------------------------------ frame advance
     static int s_steps = 0;
     void frameStep() { if (V::frameAdvance) s_steps++; }
@@ -217,6 +239,8 @@ class $modify(HackPlayLayer, PlayLayer) {
         float cpTimer = 0.f;
         unsigned frameBase = 0;
         bool hidPlayer = false;
+        bool limitPending = false;
+        double limitAt = 0.0;
     };
 
     bool init(GJGameLevel* level, bool dontCreateObjects) {
@@ -292,6 +316,7 @@ class $modify(HackPlayLayer, PlayLayer) {
         PlayLayer::resetLevel();
         auto f = m_fields.self();
         f->pendingRespawn = false;
+        f->limitPending = false;
         f->points.clear();
         if (f->trail) f->trail->clear();
         f->cpTimer = 0.f;
@@ -330,7 +355,7 @@ class $modify(HackPlayLayer, PlayLayer) {
         // respawn on our own timer
         if (f->pendingRespawn) {
             if (!V::respawnDelayOn) f->pendingRespawn = false;
-            else if (now() - f->deathAt >= V::respawnDelay) {
+            else if (now() - f->deathAt >= V::respawnDelayMs / 1000.0) {
                 f->pendingRespawn = false;
                 if (m_player1 && m_player1->m_isDead) { s_ourReset = true; this->delayedResetLevel(); s_ourReset = false; }
             }
@@ -339,6 +364,21 @@ class $modify(HackPlayLayer, PlayLayer) {
         unsigned cur = m_gameState.m_currentProgress;
         s_stats.totalFrames = cur >= f->frameBase ? cur - f->frameBase : 0;
         if (s_stats.flash > 0.f) s_stats.flash = std::max(0.f, s_stats.flash - dt * 3.f);
+        // noclip death limit: too many noclip deaths, so this attempt is over
+        if (V::noclip && V::noclipLimit && !f->limitPending && m_player1 && !m_player1->m_isDead && s_stats.totalFrames > 30) {
+            double acc = 100.0 * (1.0 - (double)s_stats.deadFrames / (double)s_stats.totalFrames);
+            if (acc < V::noclipLimitPct) {
+                f->limitPending = true;
+                f->limitAt = now();
+                s_stats.flash = 1.f;
+                menu::notify("Accuracy fell below " + std::to_string((int)V::noclipLimitPct) + "%");
+            }
+        }
+        if (f->limitPending && now() - f->limitAt >= (V::respawnDelayOn ? V::respawnDelayMs / 1000.0 : 0.0)) {
+            f->limitPending = false;
+            this->resetLevel();
+            return;
+        }
         // hide player
         if (m_player1) {
             if (V::hidePlayer) { m_player1->setVisible(false); if (m_player2) m_player2->setVisible(false); f->hidPlayer = true; }
@@ -442,6 +482,7 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         if (PlayLayer::get() != static_cast<GJBaseGameLayer*>(this) || bot::simulating()) return;
         int p = isPlayer1 ? 0 : 1;
+        if (button == 1 && s_stats.held[p] != down) playClick(down);
         if (button == 1) s_stats.held[p] = down;
         if (down && button == 1) {
             double t = now();
