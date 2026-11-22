@@ -133,7 +133,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->msg->setPosition({win.width / 2, win.height - 84.f});
         f->hud->addChild(f->msg);
         f->face = CCSprite::create("coda-face.png"_spr);
-        if (f->face) { f->face->setScale(0.26f); f->hud->addChild(f->face, 2); }
+        if (f->face) { f->face->setScale(0.85f); f->hud->addChild(f->face, 2); }
         f->hud->setVisible(false);
     }
 
@@ -346,7 +346,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (p->m_robotSprite) p->m_robotSprite->setVisible(false);
         if (p->m_spiderSprite) p->m_spiderSprite->setVisible(false);
         if (f->icon) {
-            float base = (mode == 0 || mode == 2) ? 0.25f : 0.24f;
+            float base = (mode == 0 || mode == 2) ? 1.0f : 0.96f;   // sprites are 128px UHD = 32 units
             f->icon->setPosition(p->m_mainLayer->getPosition());
             f->icon->setScaleX(base * p->m_vehicleSize * (p->m_mainLayer->getScaleX() < 0 ? -1.f : 1.f));
             f->icon->setScaleY(base * p->m_vehicleSize * (p->m_mainLayer->getScaleY() < 0 ? -1.f : 1.f));
@@ -398,7 +398,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
         this->addChild(menu, 50);
 
         auto face = CCSprite::create("coda-face.png"_spr);
-        if (face) face->setScale(0.42f);
+        if (face) face->setScale(1.4f);
         auto btn = CCMenuItemSpriteExtra::create(face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt"),
                                                  this, menu_selector(CodaPauseLayer::onCoda));
         btn->setPosition({win.width - 42.f, 52.f});
