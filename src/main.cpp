@@ -6,6 +6,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/EnhancedGameObject.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <random>
 #include <deque>
 #include <functional>
@@ -29,6 +30,7 @@ struct Brain {
     bool beaten = false;
     bool confirm = false;        // replay the best run once to set a checkpoint before experimenting
     float cpX = 0.f;             // where his current checkpoint is (0 = none)
+    std::vector<float> cps;      // all his checkpoints, oldest first
     float noCpBefore = 0.f;      // after giving up on a checkpoint, don't set another until he gets past here
     int sweep = 0;               // which nudge to try next on the jump before the spike
     // training mode
@@ -60,7 +62,7 @@ struct Mode {
     char const* name;
     bool checkpoints;     // practice from just before the hard part
     float cpMargin;       // how far before his best the checkpoint goes
-    int cpPatience;       // attempts stuck before he gives up on the checkpoint
+    int cpPatience;       // deaths in one place before he backs up a checkpoint
     float knownSpeed;     // game speed through parts he already knows
     float frontSpeed;     // game speed near the hard part
     float slip;           // chance of fumbling a known part
@@ -69,12 +71,15 @@ struct Mode {
 };
 static Mode const MODES[] = {
     {"Slow",    false, 0.f,   0,  1.f, 1.f, 0.14f, 0.30f, false},
-    {"High",    true,  210.f, 35, 3.f, 1.f, 0.07f, 0.20f, false},
-    {"Extreme", true,  120.f, 25, 5.f, 2.f, 0.03f, 0.10f, false},
-    {"Perfect", true,  120.f, 25, 5.f, 2.f, 0.f,   0.f,   true},
+    {"High",    true,  210.f, 12, 3.f, 1.f, 0.07f, 0.20f, false},
+    {"Extreme", true,  120.f, 8,  5.f, 2.f, 0.03f, 0.10f, false},
+    {"Perfect", true,  120.f, 8,  5.f, 2.f, 0.f,   0.f,   true},
 };
 static int const MODE_COUNT = 4;
 static int s_mode = 1;
+static std::string s_thought;      // what Coda is thinking right now (shown in a bubble)
+static bool s_showThoughts = true;
+static bool s_menuOpen = false;
 static bool s_training = false;
 static int s_speedIdx = 1;
 static float const SPEEDS[] = {1.f, 4.f, 10.f, 20.f};
@@ -155,13 +160,16 @@ static std::vector<Hold> mutate(std::vector<Hold> const& best, float frontier, i
     if (last >= 0 && r < 0.5f) {
         float d = nudges[sweep % 12] * (1.f + (sweep / 12) * 0.5f);
         sweep++;
+        s_thought = "Next: jump " + std::to_string((int)std::abs(d)) + (d < 0 ? " units earlier" : " units later") + " before the spike.";
         out[last].start += d;
         if (chance(0.5f)) out[last].end += d; else out[last].end += rnd(-8.f, 8.f);
     } else if (r < 0.75f) {
+        s_thought = "Next: an extra click right before where I died.";
         float s = std::max(lo, frontier - rnd(4.f, 45.f));
         float len = chance(0.65f) ? rnd(1.f, 6.f) : rnd(10.f, 90.f);
         out.push_back({s, s + len});
     } else {
+        s_thought = "Next: shaking up my last few jumps.";
         std::vector<Hold> keep;
         for (auto h : out) {
             if (h.start >= lo) {
@@ -227,6 +235,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
         float planX = 0.f;
         float planClear = 0.f;
         CCDrawNode* planNode = nullptr;
+        CCNode* bubble = nullptr;
+        CCLayerColor* bubbleBg = nullptr;
+        CCLabelBMFont* bubbleText = nullptr;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -246,6 +257,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->genLabel->setAnchorPoint({0.f, 0.5f});
         f->genLabel->setPosition({12.f, 46.f});
         f->hud->addChild(f->genLabel);
+        f->bubble = CCNode::create();
+        f->bubbleBg = CCLayerColor::create({0, 0, 0, 150}, 10.f, 10.f);
+        f->bubbleText = CCLabelBMFont::create("", "chatFont.fnt");
+        f->bubbleText->setScale(0.5f);
+        f->bubble->addChild(f->bubbleBg);
+        f->bubble->addChild(f->bubbleText);
+        f->bubble->setVisible(false);
+        if (m_objectLayer) m_objectLayer->addChild(f->bubble, 9100);
         if (s_enabled) this->codaStart();
         return true;
     }
@@ -303,6 +322,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto& b = this->brain();
         this->removeAllCheckpoints();
         b.cpX = 0.f;
+        b.cps.clear();
         if (!mode().perfect && b.finalExam) { b.finalExam = false; b.examRun = false; b.noCpBefore = 0.f; }
         if (!mode().perfect) { b.pfFailed = false; b.nodes.clear(); b.planDone = false; b.planFailed = false; }
         bool practice = mode().checkpoints && !b.finalExam;
@@ -324,6 +344,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!m_isPlatformer) {
             this->removeAllCheckpoints();
             this->brain().cpX = 0.f;
+            this->brain().cps.clear();
             if (m_isPracticeMode) this->togglePracticeMode(false);
         }
     }
@@ -405,6 +426,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (n.tried != 3) {
                 n.press = !(n.tried & 2) ? true : false;   // try the choice not tried yet
                 n.tried |= n.press ? 2 : 1;
+                s_thought = "That branch died. Going back " + std::to_string((int)(x - n.x)) + " units and trying " + (n.press ? "holding." : "letting go.");
                 return;                                    // GD respawns at this decision's checkpoint
             }
             b.nodes.pop_back();
@@ -417,6 +439,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.nodes.clear();
             this->removeAllCheckpoints();
             b.cpX = 0.f;
+            b.cps.clear();
             b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, 0.f, true);
             say("Pathfinding hit a dead end. Learning this part by trying instead.", 3.f);
         }
@@ -503,6 +526,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->release();
         if (f->sloppy && x < b.bestX) {
             say(chance(0.5f) ? "...that was on purpose." : "Slipped.");
+            s_thought = "That was a slip, not a real mistake. Same plan again.";
             b.trial = b.best;     // the slip wasn't a real lesson; try his real plan again
             return;
         }
@@ -515,6 +539,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.stuck = 0;
             b.sweep = 0;
             say("Messed up the full run. Fixing it.");
+            s_thought = "The full run went differently here. Fixing just this spot.";
             b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, 0.f, true);
             return;
         }
@@ -528,6 +553,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.best = f->play;
             b.bestX = x;
             b.bestPct = pct;
+            s_thought = "New best. Keeping that and pushing further.";
             if (b.stuck > 6) say("Finally.");
             else if (b.attempts > 1) say("New best: " + std::to_string((int)pct) + "%");
             b.stuck = 0;
@@ -538,12 +564,28 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.stuck++;
             if (b.stuck == 15) say("This spike again.");
             if (b.stuck == 40) say("I hate this part.");
-            // Stuck too long from this checkpoint: maybe the mistake is earlier. Go back to full runs.
+            // Dying over and over in one place: maybe the real mistake is earlier.
+            // Back up one checkpoint at a time and re-check the jumps from there.
             if (mode().checkpoints && b.cpX > 0.f && b.stuck % mode().cpPatience == 0) {
+                if (b.cps.size() > 1) {
+                    this->removeCheckpoint(false);
+                    b.cps.pop_back();
+                    b.cpX = b.cps.back();
+                    b.sweep = 0;
+                    std::string t = "Died " + std::to_string(b.stuck) + " times here. Backing up to checkpoint " + std::to_string(b.cps.size()) + " to re-check.";
+                    say("Backing up a checkpoint.");
+                    b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX, b.finalExam);
+                    s_thought = t;
+                    return;
+                }
                 this->removeAllCheckpoints();
+                b.cps.clear();
                 b.cpX = 0.f;
                 b.noCpBefore = b.bestX + 30.f;
                 say("Rethinking the whole thing.");
+                b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX, b.finalExam);
+                s_thought = "No checkpoints left to back up to. Re-checking from the very start.";
+                return;
             }
         }
         b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX, b.finalExam);
@@ -556,9 +598,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         float x = m_player1->m_position.x;
         float target = b.bestX - mode().cpMargin;
         if (x >= target && target > b.cpX + 60.f) {
-            this->removeAllCheckpoints();
-            this->markCheckpoint();
+            this->markCheckpoint();     // keep the older ones so he can back up later
+            b.cps.push_back(x);
             b.cpX = x;
+            s_thought = "Checkpoint " + std::to_string(b.cps.size()) + " set. Practicing the hard part from here.";
         }
     }
 
@@ -763,6 +806,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         copyState(m_player1, g);
         f->beam.push_back({-1, g, 1e9f, false, {}});
         f->planning = true;
+        s_thought = "Reading " + std::to_string(f->hazards.size()) + " hazard hitboxes...";
         if (!f->planNode && m_objectLayer) { f->planNode = CCDrawNode::create(); m_objectLayer->addChild(f->planNode, 9002); }
         this->refreshDebugDraw();
         say("Reading the level...", 1.5f);
@@ -816,6 +860,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 else this->releaseGhost(g);
             }
             f->beam = std::move(keep);
+            s_thought = "Checking " + std::to_string(f->beam.size() * 2) + " possible moves. Keeping the safest ones.";
         }
     }
 
@@ -858,6 +903,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         std::string clr = f->planClear > 1e8f ? "no hazards" : std::to_string((int)f->planClear) + " units";
         say("Plan ready: " + std::to_string(clicks) + " clicks, closest call " + clr + ". Attempt 1.", 4.f);
         f->planShow = 3.f;
+        s_thought = "This is where I'm going to go.";
         this->drawPlan();
     }
 
@@ -923,12 +969,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->exitPractice) {
             f->exitPractice = false;
             this->removeAllCheckpoints();
+            this->brain().cps.clear();
             if (m_isPracticeMode) this->togglePracticeMode(false);
         }
         this->resetLevel();
     }
 
     void onQuit() {
+        s_menuOpen = false;
         this->cleanupGhosts();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
         PlayLayer::onQuit();
@@ -940,6 +988,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->needApply) { f->needApply = false; if (s_enabled) this->applyMode(); f->needReset = true; }
         if (f->needReset) { f->needReset = false; this->resetLevel(); }
         else if (f->needPlan && s_enabled && !m_isPlatformer) this->startPlanning();
+        if (s_menuOpen) { CCDirector::get()->getScheduler()->setTimeScale(0.f); if (s_enabled) this->updateBubble(); return; }
         if (!s_enabled) return;
         if (f->planning || f->planShow > 0.f) {
             // the real level waits while he thinks
@@ -965,6 +1014,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 }
             }
             this->updateIcon();
+            this->updateBubble();
             return;
         }
         this->updateIcon();
@@ -983,7 +1033,23 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
     }
 
+    void updateBubble() {
+        auto f = m_fields.self();
+        if (!f->bubble) return;
+        bool show = s_enabled && s_showThoughts && !s_thought.empty() && m_player1;
+        f->bubble->setVisible(show);
+        if (!show) return;
+        if (std::string(f->bubbleText->getString()) != s_thought) {
+            f->bubbleText->setString(s_thought.c_str());
+            auto sz = f->bubbleText->getScaledContentSize();
+            f->bubbleBg->setContentSize({sz.width + 10.f, sz.height + 6.f});
+            f->bubbleBg->setPosition({-sz.width / 2 - 5.f, -sz.height / 2 - 3.f});
+        }
+        f->bubble->setPosition(this->playerPos() + ccp(0, 46.f));
+    }
+
     void updateHud(float dt) {
+        this->updateBubble();
         auto f = m_fields.self();
         if (!f->bar) return;
         auto& b = this->brain();
@@ -1088,6 +1154,7 @@ class $modify(GJBaseGameLayer) {
 
     void handleButton(bool down, int button, bool isPlayer1) {
         auto pl = PlayLayer::get();
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_menuOpen && !s_fromBot) return;
         if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_enabled && !pl->m_isPlatformer && !s_fromBot) {
             return;   // Coda has the controls
         }
@@ -1121,141 +1188,147 @@ class $modify(EnhancedGameObject) {
     }
 };
 
-// ---------------------------------------------------------------- pause menu buttons
-class $modify(CodaPauseLayer, PauseLayer) {
-    struct Fields {
-        CCLabelBMFont* label = nullptr;
-        std::vector<std::pair<CCLabelBMFont*, std::function<std::string()>>> texts;
-    };
+// ---------------------------------------------------------------- Coda's menu (Tab)
+class CodaMenu : public CCLayerColor {
+    struct Row { std::function<std::string()> text; std::function<void()> act; CCLabelBMFont* label = nullptr; };
+    std::vector<Row> m_rows;
+public:
+    static CodaMenu* s_open;
 
-    CCLabelBMFont* addText(CCMenu* menu, CCPoint pos, SEL_MenuHandler cb, std::function<std::string()> text) {
-        auto lbl = CCLabelBMFont::create(text().c_str(), "bigFont.fnt");
-        lbl->setScale(0.3f);
-        auto btn = CCMenuItemSpriteExtra::create(lbl, this, cb);
-        btn->setPosition(pos);
-        menu->addChild(btn);
-        m_fields->texts.push_back({lbl, text});
-        return lbl;
-    }
+    static CodaPlayLayer* pl() { return static_cast<CodaPlayLayer*>(PlayLayer::get()); }
 
-    void customSetup() {
-        PauseLayer::customSetup();
-        auto win = CCDirector::get()->getWinSize();
-        auto bg = CCLayerColor::create({0, 0, 0, 110}, 250.f, 136.f);
-        bg->setPosition({win.width - 258.f, 6.f});
-        this->addChild(bg, 49);
-        auto menu = CCMenu::create();
-        menu->setPosition({0, 0});
-        this->addChild(menu, 50);
-
-        auto face = CCSprite::create("coda-face.png"_spr);
-        if (face) face->setScale(1.4f);
-        auto btn = CCMenuItemSpriteExtra::create(face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt"),
-                                                 this, menu_selector(CodaPauseLayer::onCoda));
-        btn->setPosition({win.width - 42.f, 60.f});
-        menu->addChild(btn);
-        m_fields->label = CCLabelBMFont::create("", "bigFont.fnt");
-        m_fields->label->setScale(0.3f);
-        m_fields->label->setPosition({win.width - 42.f, 26.f});
-        this->addChild(m_fields->label, 50);
-
-        float cx = win.width - 165.f;
-        addText(menu, {cx, 130.f}, menu_selector(CodaPauseLayer::onAuto), [] { return std::string("Auto train: ") + (s_auto ? "ON" : "OFF"); });
-        addText(menu, {cx, 112.f}, menu_selector(CodaPauseLayer::onMode), [] { return std::string("Learning: ") + mode().name; });
-        addText(menu, {cx, 94.f}, menu_selector(CodaPauseLayer::onTraining), [] { return std::string("Training: ") + (s_training ? "ON" : "OFF"); });
-        addText(menu, {cx, 76.f}, menu_selector(CodaPauseLayer::onSpeed), [] { return "Speed: " + std::to_string((int)SPEEDS[s_speedIdx]) + "x"; });
-        addText(menu, {cx - 52.f, 58.f}, menu_selector(CodaPauseLayer::onSkip1), [] { return std::string("+1 gen"); });
-        addText(menu, {cx + 4.f, 58.f}, menu_selector(CodaPauseLayer::onSkip5), [] { return std::string("+5"); });
-        addText(menu, {cx + 44.f, 58.f}, menu_selector(CodaPauseLayer::onSkip10), [] { return std::string("+10"); });
-        addText(menu, {cx, 40.f}, menu_selector(CodaPauseLayer::onHitboxes), [] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); });
-        addText(menu, {cx, 22.f}, menu_selector(CodaPauseLayer::onTrail), [] { return std::string("Trail: ") + (s_trail ? "ON" : "OFF"); });
-        this->refresh();
-    }
-
-    void refresh() {
-        if (m_fields->label) m_fields->label->setString(s_enabled ? "Coda: ON" : "Coda: OFF");
-        for (auto& [lbl, text] : m_fields->texts) lbl->setString(text().c_str());
-    }
-
-    CodaPlayLayer* pl() { return static_cast<CodaPlayLayer*>(PlayLayer::get()); }
-
-    void turnOn() {
+    static void turnOn() {
         if (s_enabled) return;
         s_enabled = true;
         if (auto p = pl()) p->codaStart();
     }
 
-    void onCoda(CCObject*) {
-        if (s_enabled) {
-            s_enabled = false;
-            if (s_auto) { s_auto = false; s_mode = s_modeBeforeAuto; }
-            if (auto p = pl()) p->codaStop();
-        } else this->turnOn();
-        if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
-        this->refresh();
+    static void toggle() {
+        if (s_open) { bool wasInLevel = s_open->getParent() != nullptr; s_open->close(); if (wasInLevel || !PlayLayer::get()) return; }
+        if (!PlayLayer::get()) return;
+        auto m = new CodaMenu();
+        if (m->init()) {
+            m->autorelease();
+            CCDirector::get()->getRunningScene()->addChild(m, 10000);
+            m->retain();          // kept alive even if the level closes while it's open
+            s_open = m;
+            s_menuOpen = true;
+            PlatformToolbox::showCursor();
+        } else delete m;
     }
 
-    // Auto train: Extreme learning + Training mode on turbo, nonstop until he beats the level.
-    void onAuto(CCObject*) {
-        s_auto = !s_auto;
-        if (s_auto) {
-            s_modeBeforeAuto = s_mode;
-            s_mode = 3;   // Perfect
-            s_training = true;
-            s_turbo = 20.f;
-            this->turnOn();
-            if (auto p = pl()) {
-                if (!p->m_isPlatformer) p->m_fields->needApply = true;
-                p->brain().beaten = false;
-                p->redrawPaths();
+    void close() {
+        s_open = nullptr;
+        s_menuOpen = false;
+        CCDirector::get()->getScheduler()->setTimeScale(1.f);
+        this->removeFromParent();
+        this->release();
+    }
+
+    void addRow(std::function<std::string()> text, std::function<void()> act) { m_rows.push_back({text, act}); }
+
+    bool init() override {
+        if (!CCLayerColor::initWithColor({0, 0, 0, 140})) return false;
+        auto win = CCDirector::get()->getWinSize();
+        addRow([] { return std::string("Coda: ") + (s_enabled ? "ON" : "OFF"); }, [] {
+            if (s_enabled) { s_enabled = false; if (s_auto) { s_auto = false; s_mode = s_modeBeforeAuto; } if (auto p = pl()) p->codaStop(); }
+            else turnOn();
+            if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
+        });
+        addRow([] { return std::string("Auto train: ") + (s_auto ? "ON" : "OFF"); }, [] {
+            s_auto = !s_auto;
+            if (s_auto) {
+                s_modeBeforeAuto = s_mode; s_mode = 3; s_training = true; s_turbo = 20.f; turnOn();
+                if (auto p = pl()) { if (!p->m_isPlatformer) p->m_fields->needApply = true; p->brain().beaten = false; p->redrawPaths(); }
+            } else {
+                s_mode = s_modeBeforeAuto;
+                if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
             }
-        } else {
-            s_mode = s_modeBeforeAuto;
+        });
+        addRow([] { return std::string("Learning: ") + mode().name; }, [] {
+            s_mode = (s_mode + 1) % MODE_COUNT;
             if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
+        });
+        addRow([] { return std::string("Training: ") + (s_training ? "ON" : "OFF"); }, [] {
+            s_training = !s_training; if (s_training) turnOn(); if (auto p = pl()) p->redrawPaths();
+        });
+        addRow([] { return "Speed: " + std::to_string((int)SPEEDS[s_speedIdx]) + "x"; }, [] { s_speedIdx = (s_speedIdx + 1) % 4; });
+        for (int n : {1, 5, 10}) {
+            addRow([n] { return "Skip ahead +" + std::to_string(n) + (n == 1 ? " generation" : " generations"); }, [n] {
+                s_training = true; turnOn();
+                if (auto p = pl()) { auto& b = p->brain(); b.skipUntil = b.gen + n; p->redrawPaths(); }
+            });
         }
-        this->refresh();
-    }
+        addRow([] { return std::string("Show his thoughts: ") + (s_showThoughts ? "ON" : "OFF"); }, [] { s_showThoughts = !s_showThoughts; });
+        addRow([] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); }, [] { s_hitboxes = !s_hitboxes; if (auto p = pl()) p->refreshDebugDraw(); });
+        addRow([] { return std::string("Hitbox trail: ") + (s_trail ? "ON" : "OFF"); }, [] { s_trail = !s_trail; if (auto p = pl()) p->refreshDebugDraw(); });
 
-    void onMode(CCObject*) {
-        s_mode = (s_mode + 1) % MODE_COUNT;
-        if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
-        this->refresh();
-    }
-
-    void onTraining(CCObject*) {
-        s_training = !s_training;
-        if (s_training) this->turnOn();
-        if (auto p = pl()) p->redrawPaths();
-        this->refresh();
-    }
-
-    void onSpeed(CCObject*) {
-        s_speedIdx = (s_speedIdx + 1) % 4;
-        this->refresh();
-    }
-
-    void skip(int n) {
-        s_training = true;
-        this->turnOn();
-        if (auto p = pl()) {
-            auto& b = p->brain();
-            b.skipUntil = b.gen + n;
-            p->redrawPaths();
+        float panelH = 70.f + m_rows.size() * 22.f;
+        auto panel = CCLayerColor::create({30, 22, 40, 235}, 300.f, panelH);
+        panel->setPosition({win.width / 2 - 150.f, win.height / 2 - panelH / 2});
+        this->addChild(panel);
+        auto face = CCSprite::create("coda-face.png"_spr);
+        if (face) { face->setScale(1.1f); face->setPosition({win.width / 2 - 110.f, win.height / 2 + panelH / 2 - 26.f}); this->addChild(face); }
+        auto title = CCLabelBMFont::create("Coda", "bigFont.fnt");
+        title->setScale(0.6f);
+        title->setAnchorPoint({0.f, 0.5f});
+        title->setPosition({win.width / 2 - 84.f, win.height / 2 + panelH / 2 - 26.f});
+        this->addChild(title);
+        auto menu = CCMenu::create();
+        menu->setPosition({0, 0});
+        this->addChild(menu);
+        float y = win.height / 2 + panelH / 2 - 60.f;
+        for (size_t i = 0; i < m_rows.size(); i++) {
+            auto lbl = CCLabelBMFont::create(m_rows[i].text().c_str(), "bigFont.fnt");
+            lbl->setScale(0.38f);
+            auto btn = CCMenuItemSpriteExtra::create(lbl, this, menu_selector(CodaMenu::onRow));
+            btn->setTag((int)i);
+            btn->setPosition({win.width / 2, y - i * 22.f});
+            menu->addChild(btn);
+            m_rows[i].label = lbl;
         }
-        this->refresh();
+        auto hint = CCLabelBMFont::create("Tab to close", "chatFont.fnt");
+        hint->setScale(0.55f);
+        hint->setOpacity(160);
+        hint->setPosition({win.width / 2, win.height / 2 - panelH / 2 + 10.f});
+        this->addChild(hint);
+        return true;
     }
-    void onSkip1(CCObject*) { this->skip(1); }
-    void onSkip5(CCObject*) { this->skip(5); }
-    void onSkip10(CCObject*) { this->skip(10); }
 
-    void onHitboxes(CCObject*) {
-        s_hitboxes = !s_hitboxes;
-        if (auto p = pl()) p->refreshDebugDraw();
-        this->refresh();
+    void onRow(CCObject* sender) {
+        int i = static_cast<CCNode*>(sender)->getTag();
+        if (i < 0 || i >= (int)m_rows.size()) return;
+        m_rows[i].act();
+        for (auto& r : m_rows) if (r.label) r.label->setString(r.text().c_str());
     }
-    void onTrail(CCObject*) {
-        s_trail = !s_trail;
-        if (auto p = pl()) p->refreshDebugDraw();
-        this->refresh();
+};
+CodaMenu* CodaMenu::s_open = nullptr;
+
+class $modify(CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double time) {
+        if (key == KEY_Tab && down && !repeat && PlayLayer::get()) { CodaMenu::toggle(); return true; }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, time);
     }
+};
+
+// Pause menu: just one small button that opens the same menu.
+class $modify(CodaPauseLayer, PauseLayer) {
+    void customSetup() {
+        PauseLayer::customSetup();
+        auto win = CCDirector::get()->getWinSize();
+        auto menu = CCMenu::create();
+        menu->setPosition({0, 0});
+        this->addChild(menu, 50);
+        auto face = CCSprite::create("coda-face.png"_spr);
+        if (face) face->setScale(1.2f);
+        auto btn = CCMenuItemSpriteExtra::create(face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt"),
+                                                 this, menu_selector(CodaPauseLayer::onCoda));
+        btn->setPosition({win.width - 36.f, 46.f});
+        menu->addChild(btn);
+        auto lbl = CCLabelBMFont::create("Coda (Tab)", "bigFont.fnt");
+        lbl->setScale(0.25f);
+        lbl->setPosition({win.width - 36.f, 18.f});
+        this->addChild(lbl, 50);
+    }
+    void onCoda(CCObject*) { CodaMenu::toggle(); }
 };

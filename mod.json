@@ -5,7 +5,7 @@
  },
  "id": "coda.coda-bot",
  "name": "Coda Bot",
- "version": "v1.6.0",
+ "version": "v1.7.0",
  "developer": "Coda",
  "description": "Coda learns your levels by himself. His runs never count: no completions, no verifying, no saved progress.",
  "resources": {
