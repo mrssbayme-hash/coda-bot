@@ -7,6 +7,7 @@
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/EnhancedGameObject.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/modify/LevelInfoLayer.hpp>
 #include <random>
 #include <deque>
 #include <functional>
@@ -90,6 +91,8 @@ static bool s_pathOnly = true;      // for now Coda only pathfinds, at normal sp
 static std::string s_thought;      // what Coda is thinking right now (shown in a bubble)
 static bool s_showThoughts = true;
 static bool s_menuOpen = false;
+static bool s_analyze = false;       // working out the route behind a loading screen
+static bool s_analyzeNext = false;   // start analyzing as soon as the level opens
 static bool s_training = false;
 static int s_speedIdx = 1;
 static float const SPEEDS[] = {1.f, 4.f, 10.f, 20.f};
@@ -290,6 +293,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
         CCLayerColor* bubbleBg = nullptr;
         CCLabelBMFont* bubbleText = nullptr;
         bool tpsUsed = false;
+        bool needAnalyze = false;
+        CCLayerColor* overlay = nullptr;
+        CCLabelBMFont* anaTitle = nullptr;
+        CCLabelBMFont* anaInfo = nullptr;
+        CCLabelBMFont* anaThought = nullptr;
+        CCDrawNode* anaBar = nullptr;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -322,6 +331,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->bubble->addChild(f->bubbleText);
         f->bubble->setVisible(false);
         if (m_objectLayer) m_objectLayer->addChild(f->bubble, 9100);
+        if (s_analyzeNext) { s_analyzeNext = false; s_enabled = true; m_fields->needAnalyze = true; }
         if (s_enabled) this->codaStart();
         if (m_fields->tpsUsed) this->say("Physics at " + std::to_string(s_tps) + " Hz: practice only, progress won't save.", 3.f);
         return true;
@@ -413,6 +423,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void codaStop() {
         auto f = m_fields.self();
+        if (s_analyze) { s_analyze = false; if (f->overlay) f->overlay->setVisible(false); if (m_objectLayer) m_objectLayer->setVisible(true); }
         this->release();
         if (f->hud) f->hud->setVisible(false);
         this->restoreIcon();
@@ -855,14 +866,81 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     // Turbo: speed up while the PC keeps up (real frame under ~1/30 s), back off when it lags.
-    float turboSpeed() {
+    // ============================================================ analysis
+    // Pathfinds and proves the route behind a loading screen at top speed, then plays it for real.
+    void startAnalysis() {
+        auto f = m_fields.self();
+        f->needAnalyze = false;
+        if (m_isPlatformer) { say("Coda only plays classic levels.", 3.f); return; }
+        s_enabled = true;
+        s_analyze = true;
+        s_turbo = 20.f;
+        this->codaStart();
+        auto& b = this->brain();
+        b.beaten = false;
+        auto win = CCDirector::get()->getWinSize();
+        if (!f->overlay) {
+            f->overlay = CCLayerColor::create({18, 12, 26, 255});
+            this->addChild(f->overlay, 3000);
+            auto face = CCSprite::create("coda-face.png"_spr);
+            if (face) { face->setScale(2.2f); face->setPosition({win.width / 2, win.height / 2 + 70.f}); f->overlay->addChild(face); }
+            f->anaTitle = CCLabelBMFont::create("Coda is analyzing the level...", "bigFont.fnt");
+            f->anaTitle->setScale(0.55f);
+            f->anaTitle->setPosition({win.width / 2, win.height / 2 + 18.f});
+            f->overlay->addChild(f->anaTitle);
+            f->anaBar = CCDrawNode::create();
+            f->overlay->addChild(f->anaBar);
+            f->anaInfo = CCLabelBMFont::create("", "chatFont.fnt");
+            f->anaInfo->setScale(0.7f);
+            f->anaInfo->setPosition({win.width / 2, win.height / 2 - 34.f});
+            f->overlay->addChild(f->anaInfo);
+            f->anaThought = CCLabelBMFont::create("", "chatFont.fnt");
+            f->anaThought->setScale(0.6f);
+            f->anaThought->setOpacity(190);
+            f->anaThought->setPosition({win.width / 2, win.height / 2 - 58.f});
+            f->overlay->addChild(f->anaThought);
+        }
+        f->overlay->setVisible(true);
+        if (m_objectLayer) m_objectLayer->setVisible(false);    // nothing to draw: faster
+    }
+
+    void updateAnalysis() {
+        auto f = m_fields.self();
+        if (!f->overlay) return;
+        auto& b = this->brain();
+        auto win = CCDirector::get()->getWinSize();
+        float w = 260.f, h = 10.f, x0 = win.width / 2 - w / 2, y0 = win.height / 2 - 12.f;
+        float pct = std::clamp(b.bestPct / 100.f, 0.f, 1.f);
+        f->anaBar->clear();
+        f->anaBar->drawRect(ccp(x0, y0), ccp(x0 + w, y0 + h), ccc4f(1, 1, 1, 0.12f), 1.f, ccc4f(1, 1, 1, 0.8f));
+        if (pct > 0) f->anaBar->drawRect(ccp(x0, y0), ccp(x0 + w * pct, y0 + h), ccc4f(0.96f, 0.64f, 0.71f, 1.f), 0.f, ccc4f(0, 0, 0, 0));
+        std::string stage = pathfinding(b) ? "Finding the route" : "Checking the full run";
+        std::string info = stage + "   " + std::to_string((int)b.bestPct) + "%   " + std::to_string(b.attempts) + " attempts   " +
+                           std::to_string((int)s_turbo) + "x speed";
+        f->anaInfo->setString(info.c_str());
+        f->anaThought->setString(s_thought.c_str());
+    }
+
+    void finishAnalysis() {
+        auto f = m_fields.self();
+        auto& b = this->brain();
+        s_analyze = false;
+        if (f->overlay) f->overlay->setVisible(false);
+        if (m_objectLayer) m_objectLayer->setVisible(true);
+        CCDirector::get()->getScheduler()->setTimeScale(1.f);
+        say("Figured it out in " + std::to_string(b.attempts) + " attempts. Watch.", 4.f);
+        s_thought = "I know the route. Attempt 1.";
+        b.attempts = 0;
+    }
+
+    float turboSpeed(float cap = 60.f) {
         using clock = std::chrono::steady_clock;
         static auto last = clock::now();
         auto now = clock::now();
         float real = std::chrono::duration<float>(now - last).count();
         last = now;
         if (real > 0.f && real < 0.5f) {
-            if (real < 1.f / 40.f) s_turbo = std::min(60.f, s_turbo * 1.02f);
+            if (real < 1.f / 40.f) s_turbo = std::min(cap, s_turbo * 1.03f);
             else if (real > 1.f / 25.f) s_turbo = std::max(4.f, s_turbo * 0.9f);
         }
         return s_turbo;
@@ -1122,7 +1200,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 f->exitPractice = true;
                 say("Found a path. Now the whole thing from the start, no checkpoints.", 3.f);
             } else {
-                if (mode().perfect) say("Perfect run. From the start, no mistakes. (Doesn't count.)", 4.f);
+                if (s_analyze) { this->finishAnalysis(); }
+                else if (mode().perfect) say("Perfect run. From the start, no mistakes. (Doesn't count.)", 4.f);
                 if (s_auto) this->finishAuto();
                 else if (!mode().perfect) say("Coda beat it. (Doesn't count.)", 3.f);
             }
@@ -1149,6 +1228,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void onQuit() {
         s_menuOpen = false;
+        s_analyze = false;
         this->cleanupGhosts();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
         PlayLayer::onQuit();
@@ -1160,6 +1240,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->needApply) { f->needApply = false; if (s_enabled) this->applyMode(); f->needReset = true; }
         if (f->needReset) { f->needReset = false; this->resetLevel(); }
         else if (f->needPlan && s_enabled && !m_isPlatformer) this->startPlanning();
+        else if (f->needAnalyze) this->startAnalysis();
         if (s_menuOpen) { CCDirector::get()->getScheduler()->setTimeScale(0.f); if (s_enabled) this->updateBubble(); return; }
         if (!s_enabled) return;
         if (f->planning || f->planShow > 0.f) {
@@ -1202,6 +1283,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (s_training) speed = b.skipUntil >= 0 ? SPEEDS[3] : SPEEDS[s_speedIdx];
             if (s_auto) speed = this->turboSpeed();
             if (s_pathOnly) speed = 1.f;
+            if (s_analyze) { speed = this->turboSpeed(300.f); this->updateAnalysis(); }
             CCDirector::get()->getScheduler()->setTimeScale(speed);
         }
     }
@@ -1209,7 +1291,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void updateBubble() {
         auto f = m_fields.self();
         if (!f->bubble) return;
-        bool show = s_enabled && s_showThoughts && !s_thought.empty() && m_player1;
+        bool show = s_enabled && s_showThoughts && !s_thought.empty() && m_player1 && !s_analyze;
         f->bubble->setVisible(show);
         if (!show) return;
         if (std::string(f->bubbleText->getString()) != s_thought) {
@@ -1408,6 +1490,9 @@ public:
             else turnOn();
             if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
         });
+        addRow([] { return std::string(s_analyze ? "Analyzing..." : "Analyze and beat this level"); }, [] {
+            if (auto p = pl(); p && !s_analyze) { p->m_fields->needAnalyze = true; if (s_open) s_open->close(); }
+        });
         addRow([] { return std::string("Show his path: ") + (s_training ? "ON" : "OFF"); }, [] {
             s_training = !s_training; if (auto p = pl()) p->redrawPaths();
         });
@@ -1533,4 +1618,31 @@ class $modify(CodaPauseLayer, PauseLayer) {
         this->addChild(lbl, 50);
     }
     void onCoda(CCObject*) { CodaMenu::toggle(); }
+};
+
+// Level page: "Analyze" next to the play button. Opens the level and goes straight into analysis.
+class $modify(CodaLevelInfoLayer, LevelInfoLayer) {
+    bool init(GJGameLevel* level, bool challenge) {
+        if (!LevelInfoLayer::init(level, challenge)) return false;
+        if (level && level->isPlatformer()) return true;
+        auto menu = CCMenu::create();
+        auto face = CCSprite::create("coda-face.png"_spr);
+        CCNode* art = face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt");
+        if (face) face->setScale(1.6f);
+        auto btn = CCMenuItemSpriteExtra::create(art, this, menu_selector(CodaLevelInfoLayer::onCodaAnalyze));
+        menu->addChild(btn);
+        auto lbl = CCLabelBMFont::create("Analyze", "bigFont.fnt");
+        lbl->setScale(0.3f);
+        lbl->setPosition({btn->getContentSize().width / 2, -6.f});
+        btn->addChild(lbl);
+        auto win = CCDirector::get()->getWinSize();
+        CCPoint at = m_playBtnMenu ? m_playBtnMenu->getPosition() : ccp(win.width / 2, win.height / 2);
+        menu->setPosition(at + ccp(-95.f, 0.f));
+        this->addChild(menu, 10);
+        return true;
+    }
+    void onCodaAnalyze(CCObject*) {
+        s_analyzeNext = true;
+        this->onPlay(nullptr);
+    }
 };
