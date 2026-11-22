@@ -38,6 +38,8 @@ struct Brain {
     std::vector<CCPoint> bestClicks;
     std::deque<CCPoint> deaths;
     int skipUntil = -1;                          // skip ahead until this generation is done
+    bool finalExam = false;                      // Perfect: beat it with checkpoints, now prove it from the start
+    bool examRun = false;                        // this attempt is the first full run of the final exam
 };
 
 // ---------------------------------------------------------------- learning modes
@@ -50,12 +52,15 @@ struct Mode {
     float frontSpeed;     // game speed near the hard part
     float slip;           // chance of fumbling a known part
     float slipBeaten;
+    bool perfect;         // only counts it as beaten after a clean run from the very start
 };
 static Mode const MODES[] = {
-    {"Slow",    false, 0.f,   0,  1.f, 1.f, 0.14f, 0.30f},
-    {"High",    true,  210.f, 35, 3.f, 1.f, 0.07f, 0.20f},
-    {"Extreme", true,  120.f, 25, 5.f, 2.f, 0.03f, 0.10f},
+    {"Slow",    false, 0.f,   0,  1.f, 1.f, 0.14f, 0.30f, false},
+    {"High",    true,  210.f, 35, 3.f, 1.f, 0.07f, 0.20f, false},
+    {"Extreme", true,  120.f, 25, 5.f, 2.f, 0.03f, 0.10f, false},
+    {"Perfect", true,  120.f, 25, 5.f, 2.f, 0.f,   0.f,   true},
 };
+static int const MODE_COUNT = 4;
 static int s_mode = 1;
 static bool s_training = false;
 static int s_speedIdx = 1;
@@ -104,10 +109,10 @@ static void tidy(std::vector<Hold>& v) {
 //  - sometimes: add a jump right before the spike
 //  - otherwise: shake up everything in a window that grows the longer he's stuck
 // Nothing before `floor` (his checkpoint) can change, since he'd never replay it.
-static std::vector<Hold> mutate(std::vector<Hold> const& best, float frontier, int stuck, int& sweep, float floor) {
+static std::vector<Hold> mutate(std::vector<Hold> const& best, float frontier, int stuck, int& sweep, float floor, bool keepTail = false) {
     static float const nudges[] = {2, -2, 4, -4, 6, -6, 9, -9, 13, -13, 18, -18};
     std::vector<Hold> out;
-    for (auto h : best) if (h.start <= frontier + 30.f) out.push_back(h);   // forget what was never reached
+    for (auto h : best) if (keepTail || h.start <= frontier + 30.f) out.push_back(h);   // forget what was never reached (unless it's a known plan)
     float window = 45.f + std::min(stuck, 40) * 7.f;
     if (stuck > 25 && chance(0.25f)) window *= 2.f;
     float lo = std::max(floor + 4.f, frontier - window);
@@ -159,6 +164,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         bool used = false;        // Coda played at some point while this level was open
         bool needReset = false;
         bool needApply = false;
+        bool exitPractice = false;
         bool sloppy = false;      // this attempt had a deliberate slip
         bool held = false;
         size_t idx = 0;
@@ -247,8 +253,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto& b = this->brain();
         this->removeAllCheckpoints();
         b.cpX = 0.f;
-        b.confirm = mode().checkpoints && b.bestX > 0.f;
-        if (m_isPracticeMode != mode().checkpoints) this->togglePracticeMode(mode().checkpoints);
+        if (!mode().perfect && b.finalExam) { b.finalExam = false; b.examRun = false; b.noCpBefore = 0.f; }
+        bool practice = mode().checkpoints && !b.finalExam;
+        b.confirm = practice && b.bestX > 0.f;
+        if (m_isPracticeMode != practice) this->togglePracticeMode(practice);
     }
 
     void codaStop() {
@@ -372,10 +380,22 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.trial = b.best;     // the slip wasn't a real lesson; try his real plan again
             return;
         }
+        bool exam = b.examRun;
+        b.examRun = false;
+        if (exam && x < b.bestX) {
+            // Failed the full run here: the plan is right up to this point, so fix it from here.
+            b.bestX = x;
+            b.bestPct = pct;
+            b.stuck = 0;
+            b.sweep = 0;
+            say("Messed up the full run. Fixing it.");
+            b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, 0.f, true);
+            return;
+        }
         if (b.confirm) {          // the replay that sets his checkpoint; not an experiment
             b.confirm = false;
             if (x > b.bestX + 0.5f) { b.bestX = x; b.bestPct = pct; }
-            b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX);
+            b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX, b.finalExam);
             return;
         }
         if (x > b.bestX + 0.5f) {
@@ -400,7 +420,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 say("Rethinking the whole thing.");
             }
         }
-        b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX);
+        b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX, b.finalExam);
     }
 
     // During the confirm replay, drop a checkpoint a bit before his best.
@@ -526,8 +546,21 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.best = f->play;
             b.bestX = m_player1 ? m_player1->m_position.x : b.bestX;
             b.trial = b.best;
-            if (s_auto) this->finishAuto();
-            else say("Coda beat it. (Doesn't count.)", 3.f);
+            if (mode().perfect && m_isPracticeMode) {
+                // Beat it using checkpoints. Not good enough: now a clean run from the start.
+                b.beaten = false;
+                b.bestPct = 99.f;
+                b.finalExam = true;
+                b.examRun = true;
+                b.cpX = 0.f;
+                b.noCpBefore = 1e9f;
+                f->exitPractice = true;
+                say("Got it with checkpoints. Now the whole thing, no checkpoints.", 3.f);
+            } else {
+                if (mode().perfect) say("Perfect run. From the start, no mistakes. (Doesn't count.)", 4.f);
+                if (s_auto) this->finishAuto();
+                else if (!mode().perfect) say("Coda beat it. (Doesn't count.)", 3.f);
+            }
         } else {
             say("Coda played this level, so it doesn't count. Reopen the level to play for real.", 4.f);
         }
@@ -538,7 +571,15 @@ class $modify(CodaPlayLayer, PlayLayer) {
             nullptr));
     }
 
-    void codaRestart() { this->resetLevel(); }
+    void codaRestart() {
+        auto f = m_fields.self();
+        if (f->exitPractice) {
+            f->exitPractice = false;
+            this->removeAllCheckpoints();
+            if (m_isPracticeMode) this->togglePracticeMode(false);
+        }
+        this->resetLevel();
+    }
 
     void onQuit() {
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
@@ -745,7 +786,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
         s_auto = !s_auto;
         if (s_auto) {
             s_modeBeforeAuto = s_mode;
-            s_mode = 2;
+            s_mode = 3;   // Perfect
             s_training = true;
             s_turbo = 20.f;
             this->turnOn();
@@ -762,7 +803,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
     }
 
     void onMode(CCObject*) {
-        s_mode = (s_mode + 1) % 3;
+        s_mode = (s_mode + 1) % MODE_COUNT;
         if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
         this->refresh();
     }
