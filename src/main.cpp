@@ -48,7 +48,10 @@ struct Brain {
     bool examRun = false;                        // this attempt is the first full run of the final exam
     // Perfect: pathfinding. A decision every few units (hold or let go), each with a checkpoint
     // so he can back up and try the other choice when a branch dies.
-    struct Node { float x; bool press; unsigned char tried; bool cp; };
+    struct Node { float x; bool press; unsigned char tried; bool cp; bool ground; };
+    std::vector<CCRect> orbs;    // orb hitboxes: the only places a mid-air click matters for cube/ball/robot/spider
+    float sameX = -1e9f;         // where he keeps dying
+    int sameCount = 0;
     std::vector<Node> nodes;
     bool pfFailed = false;
     int pfDeaths = 0;
@@ -374,7 +377,18 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (s_pathOnly) {
             this->removeAllCheckpoints();
             b.cps.clear(); b.cpX = 0.f; b.confirm = false;
-            if (!b.finalExam) { b.nodes.clear(); b.pfDeaths = 0; }
+            if (!b.finalExam) { b.nodes.clear(); b.pfDeaths = 0; b.sameCount = 0; }
+            b.orbs.clear();
+            if (m_objects) for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+                if (!obj) continue;
+                switch (obj->m_objectType) {
+                    case GameObjectType::YellowJumpRing: case GameObjectType::PinkJumpRing: case GameObjectType::GravityRing:
+                    case GameObjectType::GreenRing: case GameObjectType::DropRing: case GameObjectType::RedJumpRing:
+                    case GameObjectType::CustomRing: case GameObjectType::DashRing: case GameObjectType::GravityDashRing:
+                        b.orbs.push_back(obj->getObjectRect()); break;
+                    default: break;
+                }
+            }
             bool practice = !b.finalExam;
             if (m_isPracticeMode != practice) this->togglePracticeMode(practice);
             s_thought = b.finalExam ? "Running my path from the start." : "Pathfinding. Every few units I choose: hold or let go.";
@@ -448,13 +462,24 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void pfStep(float x) {
         auto f = m_fields.self();
         auto& b = this->brain();
-        if (b.nodes.empty() || x >= b.nodes.back().x + PF_STEP) {
+        // In cube, ball and spider a choice in mid-air does nothing (unless an orb is near),
+        // so he only makes decisions while on the ground. Far fewer checkpoints, and no wasted tries.
+        int im = this->iconOf(m_player1);
+        bool groundMode = im == 0 || im == 2 || im == 6;      // (robot needs mid-air holds, so it decides in the air too)
+        bool onGround = m_player1->m_isOnGround;
+        bool orbNear = false;
+        if (groundMode && !onGround) {
+            auto r = m_player1->getObjectRect();
+            for (auto& o : b.orbs) if (std::abs(o.getMidX() - r.getMidX()) < 60.f && std::abs(o.getMidY() - r.getMidY()) < 60.f) { orbNear = true; break; }
+        }
+        bool decide = !groundMode || onGround || orbNear;
+        if (decide && (b.nodes.empty() || x >= b.nodes.back().x + PF_STEP)) {
             bool prev = !b.nodes.empty() && b.nodes.back().press;
             if (!b.guide.empty()) {                         // follow the path he found before, first
                 prev = false;
                 for (auto& h : b.guide) if (h.start <= x && x < h.end) { prev = true; break; }
             }
-            Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false};
+            Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false, onGround || !groundMode};
             this->markCheckpoint();
             n.cp = true;
             int cps = 0;
@@ -483,6 +508,25 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (x > b.bestX + 0.5f) {
             b.bestX = x; b.bestPct = pct; b.pfDeaths = 0;
             this->m_fields->smugTime = 1.f;
+        }
+        if (std::abs(x - b.sameX) < 30.f) b.sameCount++;
+        else { b.sameX = x; b.sameCount = 1; }
+        if (b.sameCount >= 10) {
+            // Died 10 times on the same jump: go back to where he last stood on the ground before it
+            // (the takeoff) and rethink from there.
+            b.sameCount = 0;
+            size_t i = b.nodes.size();
+            while (i > 0 && !b.nodes[i - 1].ground) i--;          // skip mid-air choices (orbs)
+            if (i > 0) i--;                                       // the takeoff itself
+            while (i > 0 && b.nodes[i].tried == 3) i--;           // earlier ground choices if the takeoff is used up
+            if (i < b.nodes.size() && b.nodes[i].cp && b.nodes[i].tried != 3) {
+                while (b.nodes.size() > i + 1) { b.nodes.pop_back(); this->removeCheckpoint(false); }
+                auto& n = b.nodes.back();
+                n.press = !(n.tried & 2);
+                n.tried |= n.press ? 2 : 1;
+                s_thought = "Died 10 times on this jump. Going back to where I took off and trying " + std::string(n.press ? "jumping there." : "waiting there.");
+                return;
+            }
         }
         while ((s_pathOnly || b.pfDeaths <= 900) && !b.nodes.empty()) {
             auto& n = b.nodes.back();
