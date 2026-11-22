@@ -51,11 +51,12 @@ struct Brain {
     std::vector<Node> nodes;
     bool pfFailed = false;
     int pfDeaths = 0;
+    std::vector<Hold> guide;    // a path he found before; tried first when pathfinding again
     bool planDone = false;      // Perfect: the planner already ran on this level
     bool planFailed = false;    // ...and couldn't reach the end, so use pathfinding instead
 };
 static float const PF_STEP = 12.f;     // units between decisions
-static int const PF_WINDOW = 48;       // how many decisions back he can rewind
+static int const PF_WINDOW = 400;      // how many decisions back he can rewind
 
 // ---------------------------------------------------------------- learning modes
 struct Mode {
@@ -76,7 +77,8 @@ static Mode const MODES[] = {
     {"Perfect", true,  120.f, 8,  5.f, 2.f, 0.f,   0.f,   true},
 };
 static int const MODE_COUNT = 4;
-static int s_mode = 1;
+static int s_mode = 3;              // Perfect (no fumbles)
+static bool s_pathOnly = true;      // for now Coda only pathfinds, at normal speed
 static std::string s_thought;      // what Coda is thinking right now (shown in a bubble)
 static bool s_showThoughts = true;
 static bool s_menuOpen = false;
@@ -104,7 +106,7 @@ static void applyFps() {
     CCDirector::get()->setAnimationInterval(1.0 / fps);
 }
 static Mode const& mode() { return MODES[s_mode]; }
-static bool pathfinding(Brain const& b) { return mode().perfect && b.planFailed && !b.finalExam && !b.pfFailed; }
+static bool pathfinding(Brain const& b) { return (s_pathOnly || (mode().perfect && b.planFailed)) && !b.finalExam && !b.pfFailed; }
 static std::vector<Hold> holdsFrom(std::vector<Brain::Node> const& nodes) {
     std::vector<Hold> out;
     for (size_t i = 0; i < nodes.size(); i++) {
@@ -320,13 +322,22 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // Slow plays every attempt from the start; High and Extreme practice from checkpoints.
     void applyMode() {
         auto& b = this->brain();
+        if (s_pathOnly) {
+            this->removeAllCheckpoints();
+            b.cps.clear(); b.cpX = 0.f; b.confirm = false;
+            if (!b.finalExam) { b.nodes.clear(); b.pfDeaths = 0; }
+            bool practice = !b.finalExam;
+            if (m_isPracticeMode != practice) this->togglePracticeMode(practice);
+            s_thought = b.finalExam ? "Running my path from the start." : "Pathfinding. Every few units I choose: hold or let go.";
+            return;
+        }
         this->removeAllCheckpoints();
         b.cpX = 0.f;
         b.cps.clear();
         if (!mode().perfect && b.finalExam) { b.finalExam = false; b.examRun = false; b.noCpBefore = 0.f; }
         if (!mode().perfect) { b.pfFailed = false; b.nodes.clear(); b.planDone = false; b.planFailed = false; }
         bool practice = mode().checkpoints && !b.finalExam;
-        if (mode().perfect && !b.planDone) { practice = false; m_fields->needPlan = true; }
+        if (mode().perfect && !b.planDone && !s_pathOnly) { practice = false; m_fields->needPlan = true; }
         if (mode().perfect && b.planDone && !b.planFailed) practice = false;
         b.confirm = practice && b.bestX > 0.f && !mode().perfect;
         if (pathfinding(b)) { b.nodes.clear(); b.confirm = false; b.pfDeaths = 0; }
@@ -390,6 +401,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto& b = this->brain();
         if (b.nodes.empty() || x >= b.nodes.back().x + PF_STEP) {
             bool prev = !b.nodes.empty() && b.nodes.back().press;
+            if (!b.guide.empty()) {                         // follow the path he found before, first
+                prev = false;
+                for (auto& h : b.guide) if (h.start <= x && x < h.end) { prev = true; break; }
+            }
             Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false};
             this->markCheckpoint();
             n.cp = true;
@@ -420,7 +435,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.bestX = x; b.bestPct = pct; b.pfDeaths = 0;
             this->m_fields->smugTime = 1.f;
         }
-        while (b.pfDeaths <= 900 && !b.nodes.empty()) {
+        while ((s_pathOnly || b.pfDeaths <= 900) && !b.nodes.empty()) {
             auto& n = b.nodes.back();
             if (!n.cp) break;                              // too far back to rewind
             if (n.tried != 3) {
@@ -432,7 +447,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.nodes.pop_back();
             this->removeCheckpoint(false);
         }
-        if (b.pfDeaths > 900 || b.nodes.empty() || !b.nodes.back().cp) {
+        if ((!s_pathOnly && b.pfDeaths > 900) || b.nodes.empty() || !b.nodes.back().cp) {
             // Every choice within reach dies: the real mistake is further back. Learn it the slow way.
             b.pfFailed = true;
             b.best = holdsFrom(b.nodes);
@@ -491,6 +506,17 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void onCodaDeath(float x, float pct) {
         auto& b = this->brain();
         float oldBest = b.bestX;
+        if (s_pathOnly && b.finalExam) {
+            this->release();
+            b.finalExam = false; b.examRun = false; b.beaten = false;
+            b.guide = b.best;
+            b.bestX = x; b.bestPct = pct;
+            m_fields->needApply = true;
+            say("Full run went differently. Pathfinding that part again.", 3.f);
+            s_thought = "Following my old path, then fixing the spot where it broke.";
+            this->trainingBookkeeping(x, pct, false);
+            return;
+        }
         if (pathfinding(b) && m_isPracticeMode) this->pfDeath(x, pct);
         else this->learnFromDeath(x, pct);
         this->trainingBookkeeping(x, pct, b.bestX > oldBest + 0.5f);
@@ -933,7 +959,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         // Blocked: no completion, no rewards, no verifying.
         if (s_enabled) {
             auto& b = this->brain();
-            if (pathfinding(b)) { f->play = holdsFrom(b.nodes); b.nodes.clear(); }
+            if (pathfinding(b)) { f->play = holdsFrom(b.nodes); b.guide = f->play; b.nodes.clear(); }
             b.beaten = true;
             b.bestPct = 100.f;
             b.best = f->play;
@@ -1029,6 +1055,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             float speed = known ? mode().knownSpeed : mode().frontSpeed;
             if (s_training) speed = b.skipUntil >= 0 ? SPEEDS[3] : SPEEDS[s_speedIdx];
             if (s_auto) speed = this->turboSpeed();
+            if (s_pathOnly) speed = 1.f;
             CCDirector::get()->getScheduler()->setTimeScale(speed);
         }
     }
@@ -1065,7 +1092,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->face) f->face->setPosition({x0 + w * now, y0 + h / 2});
         f->pct->setString((std::to_string((int)(now * 100)) + "%").c_str());
         std::string info = "Best " + std::to_string((int)b.bestPct) + "%   Attempt " + std::to_string(b.attempts) +
-            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + (pathfinding(b) ? ": pathfinding" : (b.finalExam && !b.beaten ? ": full run" : "")) + "]" +
+            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + (s_pathOnly ? std::string(pathfinding(b) ? "Pathfinding" : "Full run") : std::string(mode().name) + (pathfinding(b) ? ": pathfinding" : (b.finalExam && !b.beaten ? ": full run" : ""))) + "]" +
             (s_auto ? "   AUTO TRAIN " + std::to_string((int)s_turbo) + "x" : "");
         f->info->setString(info.c_str());
 
@@ -1188,7 +1215,7 @@ class $modify(EnhancedGameObject) {
     }
 };
 
-// ---------------------------------------------------------------- Coda's menu (Tab)
+// ---------------------------------------------------------------- Coda's menu (~ key)
 class CodaMenu : public CCLayerColor {
     struct Row { std::function<std::string()> text; std::function<void()> act; CCLabelBMFont* label = nullptr; };
     std::vector<Row> m_rows;
@@ -1235,6 +1262,10 @@ public:
             else turnOn();
             if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
         });
+        addRow([] { return std::string("Show his path: ") + (s_training ? "ON" : "OFF"); }, [] {
+            s_training = !s_training; if (auto p = pl()) p->redrawPaths();
+        });
+        if (!s_pathOnly) {
         addRow([] { return std::string("Auto train: ") + (s_auto ? "ON" : "OFF"); }, [] {
             s_auto = !s_auto;
             if (s_auto) {
@@ -1258,6 +1289,7 @@ public:
                 s_training = true; turnOn();
                 if (auto p = pl()) { auto& b = p->brain(); b.skipUntil = b.gen + n; p->redrawPaths(); }
             });
+        }
         }
         addRow([] { return std::string("Show his thoughts: ") + (s_showThoughts ? "ON" : "OFF"); }, [] { s_showThoughts = !s_showThoughts; });
         addRow([] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); }, [] { s_hitboxes = !s_hitboxes; if (auto p = pl()) p->refreshDebugDraw(); });
@@ -1287,7 +1319,7 @@ public:
             menu->addChild(btn);
             m_rows[i].label = lbl;
         }
-        auto hint = CCLabelBMFont::create("Tab to close", "chatFont.fnt");
+        auto hint = CCLabelBMFont::create("~ to close", "chatFont.fnt");
         hint->setScale(0.55f);
         hint->setOpacity(160);
         hint->setPosition({win.width / 2, win.height / 2 - panelH / 2 + 10.f});
@@ -1306,7 +1338,7 @@ CodaMenu* CodaMenu::s_open = nullptr;
 
 class $modify(CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double time) {
-        if (key == KEY_Tab && down && !repeat && PlayLayer::get()) { CodaMenu::toggle(); return true; }
+        if (key == KEY_OEM3 && down && !repeat && PlayLayer::get()) { CodaMenu::toggle(); return true; }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, time);
     }
 };
@@ -1325,7 +1357,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
                                                  this, menu_selector(CodaPauseLayer::onCoda));
         btn->setPosition({win.width - 36.f, 46.f});
         menu->addChild(btn);
-        auto lbl = CCLabelBMFont::create("Coda (Tab)", "bigFont.fnt");
+        auto lbl = CCLabelBMFont::create("Coda (~)", "bigFont.fnt");
         lbl->setScale(0.25f);
         lbl->setPosition({win.width - 36.f, 18.f});
         this->addChild(lbl, 50);
