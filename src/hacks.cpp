@@ -194,7 +194,9 @@ namespace hacks {
     static bool s_needRestart = false;
     void reopenLevel() { if (PlayLayer::get()) s_needRestart = true; }
     static bool isDeco(GameObject* o) {
-        if (!o || o->m_isTrigger || o->m_objectID == 31) return false;
+        if (!o || o->m_isTrigger) return false;
+        // keep start positions (31), practice checkpoints (44) and checkpoint objects (2063)
+        if (o->m_objectID == 31 || o->m_objectID == 44 || o->m_objectID == 2063) return false;
         return o->m_objectType == GameObjectType::Decoration;
     }
 
