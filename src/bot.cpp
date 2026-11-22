@@ -6,7 +6,6 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/EnhancedGameObject.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/LevelInfoLayer.hpp>
 #include <random>
 #include <deque>
@@ -15,6 +14,9 @@
 #include <unordered_set>
 #include <cstring>
 #include <algorithm>
+
+#include "config.hpp"
+#include "shared.hpp"
 
 using namespace geode::prelude;
 
@@ -91,7 +93,6 @@ static int s_mode = 3;              // Perfect (no fumbles)
 static bool s_pathOnly = true;      // for now Coda only pathfinds, at normal speed
 static std::string s_thought;      // what Coda is thinking right now (shown in a bubble)
 static bool s_showThoughts = true;
-static bool s_menuOpen = false;
 static bool s_analyze = false;       // working out the route behind a loading screen
 static bool s_analyzeNext = false;   // start analyzing as soon as the level opens
 static bool s_training = false;
@@ -112,52 +113,6 @@ static int const PLAN_STEPS = 8;      // physics steps per decision (1/30 s)
 static bool s_trail = false;
 static int perGen() { return std::max(1, (int)Mod::get()->getSettingValue<int64_t>("attempts-per-generation")); }
 static int oldPathCount() { return std::max(0, (int)Mod::get()->getSettingValue<int64_t>("old-paths")); }
-// ---------------------------------------------------------------- physics hertz (TPS) bypass
-// GD 2.2091 runs physics at 240 steps a second, set by two constants used in GJBaseGameLayer:
-//   getModifiedDelta:  timestep = 1/240        (instruction at 0x340671)
-//   update:            steps    = delta*60*4.0 (instruction at 0x340900)
-// We point those two instructions at our own values (stored in unused padding bytes),
-// so the original constants that other code shares stay untouched.
-static int s_tps = 240;
-static std::vector<Patch*> s_tpsPatches;
-static bool s_tpsBroken = false;
-static int const TPS_STEPS[] = {240, 60, 120, 144, 165, 360, 480, 1000};
-
-static bool setTps(int tps) {
-    if (s_tpsBroken) return false;
-    uintptr_t base = geode::base::get();
-    auto bytesOf = [](auto v) { ByteVector b(sizeof(v)); std::memcpy(b.data(), &v, sizeof(v)); return b; };
-    if (s_tpsPatches.empty()) {
-        // only patch the exact build we expect (Steam 2.2091)
-        static unsigned char const want1[] = {0xf2, 0x0f, 0x59, 0x3d, 0xc7, 0x49, 0x4f, 0x00};
-        static unsigned char const want2[] = {0xf2, 0x0f, 0x59, 0x0d, 0xe8, 0x49, 0x4f, 0x00};
-        auto pad1 = reinterpret_cast<unsigned char*>(base + 0x3406c8);
-        auto pad2 = reinterpret_cast<unsigned char*>(base + 0x33cf38);
-        bool ok = std::memcmp((void*)(base + 0x340671), want1, 8) == 0 && std::memcmp((void*)(base + 0x340900), want2, 8) == 0;
-        for (int i = 0; i < 8 && ok; i++) ok = pad1[i] == 0xcc && pad2[i] == 0xcc;
-        if (!ok) { s_tpsBroken = true; return false; }
-        auto add = [&](uintptr_t rva, ByteVector b) {
-            auto r = Mod::get()->patch((void*)(base + rva), b);
-            if (r.isOk()) s_tpsPatches.push_back(r.unwrap()); else s_tpsBroken = true;
-        };
-        add(0x3406c8, bytesOf(1.0 / 240.0));
-        add(0x33cf38, bytesOf(4.0));
-        add(0x340675, bytesOf((int32_t)(0x3406c8 - 0x340679)));
-        add(0x340904, bytesOf((int32_t)(0x33cf38 - 0x340908)));
-        if (s_tpsBroken) return false;
-    }
-    (void)s_tpsPatches[0]->updateBytes(bytesOf(1.0 / (double)tps));
-    (void)s_tpsPatches[1]->updateBytes(bytesOf((double)tps / 60.0));
-    for (auto p : s_tpsPatches) (void)p->toggle(tps != 240);
-    s_tps = tps;
-    return true;
-}
-
-static void applyFps() {
-    if (!Mod::get()->getSettingValue<bool>("fps-bypass")) return;
-    double fps = (double)std::max<int64_t>(30, Mod::get()->getSettingValue<int64_t>("fps"));
-    CCDirector::get()->setAnimationInterval(1.0 / fps);
-}
 static Mode const& mode() { return MODES[s_mode]; }
 static bool pathfinding(Brain const& b) { return (s_pathOnly || (mode().perfect && b.planFailed)) && !b.finalExam && !b.pfFailed; }
 static std::vector<Hold> holdsFrom(std::vector<Brain::Node> const& nodes) {
@@ -300,6 +255,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         CCLabelBMFont* anaInfo = nullptr;
         CCLabelBMFont* anaThought = nullptr;
         CCDrawNode* anaBar = nullptr;
+        CCDrawNode* traj = nullptr;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -307,12 +263,6 @@ class $modify(CodaPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool dontCreateObjects) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
         this->buildHud();
-        applyFps();
-        if (s_tps == 240) {
-            int saved = (int)Mod::get()->getSavedValue<int64_t>("tps", 240);
-            if (saved != 240) setTps(saved);
-        }
-        if (s_tps != 240) { m_isTestMode = true; m_fields->tpsUsed = true; }
         auto f = m_fields.self();
         f->paths = CCDrawNode::create();
         f->live = CCDrawNode::create();
@@ -333,8 +283,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->bubble->setVisible(false);
         if (m_objectLayer) m_objectLayer->addChild(f->bubble, 9100);
         if (s_analyzeNext) { s_analyzeNext = false; s_enabled = true; m_fields->needAnalyze = true; }
+        if (V::pathfinder) s_enabled = true;
         if (s_enabled) this->codaStart();
-        if (m_fields->tpsUsed) this->say("Physics at " + std::to_string(s_tps) + " Hz: practice only, progress won't save.", 3.f);
         return true;
     }
 
@@ -1229,8 +1179,46 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->resetLevel();
     }
 
+    // Show trajectory: two invisible copies of you, one holding and one letting go, run ahead with the game's own physics.
+    void drawTrajectory() {
+        auto f = m_fields.self();
+        if (!m_objectLayer) return;
+        if (!f->traj) { f->traj = CCDrawNode::create(); m_objectLayer->addChild(f->traj, 9002); }
+        f->traj->clear();
+        if (!V::trajectory || s_sim || f->planning || !m_player1 || m_player1->m_isDead || m_isPlatformer) return;
+        int steps = std::clamp(V::trajLen, 10, 480);
+        for (int k = 0; k < 2; k++) {
+            bool press = k == 0;
+            auto g = this->acquireGhost();
+            if (!g) return;
+            copyState(m_player1, g);
+            std::unordered_set<GameObject*> act;
+            s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
+            if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
+            CCPoint prev = this->ghostPos(g);
+            auto col = press ? ccc4f(0.96f, 0.64f, 0.71f, 0.95f) : ccc4f(1.f, 1.f, 1.f, 0.85f);
+            for (int i = 0; i < steps; i++) {
+                g->update(0.25f);
+                this->checkCollisions(g, 0.25f, false);
+                if (s_ghostDead || g->m_isDead) break;
+                g->updateRotation(0.25f);
+                CCPoint p = this->ghostPos(g);
+                f->traj->drawSegment(prev, p, 1.3f, col);
+                prev = p;
+                if (g->m_position.x >= m_levelLength) break;
+            }
+            bool died = s_ghostDead || g->m_isDead;
+            s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr;
+            if (died) {
+                auto red = ccc4f(1.f, .25f, .3f, 1.f);
+                f->traj->drawSegment(prev + ccp(-6, -6), prev + ccp(6, 6), 1.6f, red);
+                f->traj->drawSegment(prev + ccp(-6, 6), prev + ccp(6, -6), 1.6f, red);
+            }
+            this->releaseGhost(g);
+        }
+    }
+
     void onQuit() {
-        s_menuOpen = false;
         s_analyze = false;
         this->cleanupGhosts();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
@@ -1240,11 +1228,13 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
         auto f = m_fields.self();
+        s_training = V::showPath;
+        s_showThoughts = V::showThoughts;
+        this->drawTrajectory();
         if (f->needApply) { f->needApply = false; if (s_enabled) this->applyMode(); f->needReset = true; }
         if (f->needReset) { f->needReset = false; this->resetLevel(); }
         else if (f->needPlan && s_enabled && !m_isPlatformer) this->startPlanning();
         else if (f->needAnalyze) this->startAnalysis();
-        if (s_menuOpen) { CCDirector::get()->getScheduler()->setTimeScale(0.f); if (s_enabled) this->updateBubble(); return; }
         if (!s_enabled) return;
         if (f->planning || f->planShow > 0.f) {
             // the real level waits while he thinks
@@ -1276,7 +1266,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->updateIcon();
         this->updateHud(dt);
         f->fpsTimer -= dt;
-        if (f->fpsTimer <= 0.f) { f->fpsTimer = 2.f; applyFps(); }
+        if (f->fpsTimer <= 0.f) { f->fpsTimer = 2.f; hacks::applyFps(); }
         if (m_player1 && !m_isPlatformer) {
             this->maybeCheckpoint();
             this->updateTraining(dt);
@@ -1412,7 +1402,7 @@ class $modify(GJBaseGameLayer) {
 
     void handleButton(bool down, int button, bool isPlayer1) {
         auto pl = PlayLayer::get();
-        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_menuOpen && !s_fromBot) return;
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && menu::isOpen() && !s_fromBot) return;
         if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_enabled && !pl->m_isPlatformer && !s_fromBot) {
             return;   // Coda has the controls
         }
@@ -1446,162 +1436,7 @@ class $modify(EnhancedGameObject) {
     }
 };
 
-// ---------------------------------------------------------------- Coda's menu (~ key)
-class CodaMenu : public CCLayerColor {
-    struct Row { std::function<std::string()> text; std::function<void()> act; CCLabelBMFont* label = nullptr; };
-    std::vector<Row> m_rows;
-public:
-    static CodaMenu* s_open;
-
-    static CodaPlayLayer* pl() { return static_cast<CodaPlayLayer*>(PlayLayer::get()); }
-
-    static void turnOn() {
-        if (s_enabled) return;
-        s_enabled = true;
-        if (auto p = pl()) p->codaStart();
-    }
-
-    static void toggle() {
-        if (s_open) { bool wasInLevel = s_open->getParent() != nullptr; s_open->close(); if (wasInLevel || !PlayLayer::get()) return; }
-        if (!PlayLayer::get()) return;
-        auto m = new CodaMenu();
-        if (m->init()) {
-            m->autorelease();
-            CCDirector::get()->getRunningScene()->addChild(m, 10000);
-            m->retain();          // kept alive even if the level closes while it's open
-            s_open = m;
-            s_menuOpen = true;
-            PlatformToolbox::showCursor();
-        } else delete m;
-    }
-
-    void close() {
-        s_open = nullptr;
-        s_menuOpen = false;
-        CCDirector::get()->getScheduler()->setTimeScale(1.f);
-        this->removeFromParent();
-        this->release();
-    }
-
-    void addRow(std::function<std::string()> text, std::function<void()> act) { m_rows.push_back({text, act}); }
-
-    bool init() override {
-        if (!CCLayerColor::initWithColor({0, 0, 0, 140})) return false;
-        auto win = CCDirector::get()->getWinSize();
-        addRow([] { return std::string("Coda: ") + (s_enabled ? "ON" : "OFF"); }, [] {
-            if (s_enabled) { s_enabled = false; if (s_auto) { s_auto = false; s_mode = s_modeBeforeAuto; } if (auto p = pl()) p->codaStop(); }
-            else turnOn();
-            if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
-        });
-        addRow([] { return std::string(s_analyze ? "Analyzing..." : "Analyze and beat this level"); }, [] {
-            if (auto p = pl(); p && !s_analyze) { p->m_fields->needAnalyze = true; if (s_open) s_open->close(); }
-        });
-        addRow([] { return std::string("Show his path: ") + (s_training ? "ON" : "OFF"); }, [] {
-            s_training = !s_training; if (auto p = pl()) p->redrawPaths();
-        });
-        if (!s_pathOnly) {
-        addRow([] { return std::string("Auto train: ") + (s_auto ? "ON" : "OFF"); }, [] {
-            s_auto = !s_auto;
-            if (s_auto) {
-                s_modeBeforeAuto = s_mode; s_mode = 3; s_training = true; s_turbo = 20.f; turnOn();
-                if (auto p = pl()) { if (!p->m_isPlatformer) p->m_fields->needApply = true; p->brain().beaten = false; p->redrawPaths(); }
-            } else {
-                s_mode = s_modeBeforeAuto;
-                if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
-            }
-        });
-        addRow([] { return std::string("Learning: ") + mode().name; }, [] {
-            s_mode = (s_mode + 1) % MODE_COUNT;
-            if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
-        });
-        addRow([] { return std::string("Training: ") + (s_training ? "ON" : "OFF"); }, [] {
-            s_training = !s_training; if (s_training) turnOn(); if (auto p = pl()) p->redrawPaths();
-        });
-        addRow([] { return "Speed: " + std::to_string((int)SPEEDS[s_speedIdx]) + "x"; }, [] { s_speedIdx = (s_speedIdx + 1) % 4; });
-        for (int n : {1, 5, 10}) {
-            addRow([n] { return "Skip ahead +" + std::to_string(n) + (n == 1 ? " generation" : " generations"); }, [n] {
-                s_training = true; turnOn();
-                if (auto p = pl()) { auto& b = p->brain(); b.skipUntil = b.gen + n; p->redrawPaths(); }
-            });
-        }
-        }
-        addRow([] { return std::string("FPS bypass: ") + (Mod::get()->getSettingValue<bool>("fps-bypass") ? "ON" : "OFF"); }, [] {
-            bool on = !Mod::get()->getSettingValue<bool>("fps-bypass");
-            (void)Mod::get()->setSettingValue<bool>("fps-bypass", on);
-            if (on) { PlatformToolbox::toggleVerticalSync(false); applyFps(); }
-            else CCDirector::get()->setAnimationInterval(1.0 / 60.0);
-        });
-        addRow([] { return "FPS: " + std::to_string((int)Mod::get()->getSettingValue<int64_t>("fps")); }, [] {
-            static int64_t const steps[] = {60, 120, 144, 165, 240, 360, 480, 1000};
-            int64_t cur = Mod::get()->getSettingValue<int64_t>("fps"), next = steps[0];
-            for (auto v : steps) if (v > cur) { next = v; break; }
-            (void)Mod::get()->setSettingValue<int64_t>("fps", next);
-            applyFps();
-        });
-        addRow([] {
-            if (s_tpsBroken) return std::string("Physics Hz bypass: not supported on this GD version");
-            return "Physics Hz (TPS): " + std::to_string(s_tps) + (s_tps == 240 ? " (normal)" : " (practice only)");
-        }, [] {
-            int next = 240;
-            for (size_t i = 0; i < std::size(TPS_STEPS); i++) if (TPS_STEPS[i] == s_tps) { next = TPS_STEPS[(i + 1) % std::size(TPS_STEPS)]; break; }
-            if (setTps(next)) {
-                (void)Mod::get()->setSavedValue<int64_t>("tps", next);
-                if (auto p = pl(); p && next != 240) { p->m_isTestMode = true; p->m_fields->tpsUsed = true; }
-            }
-        });
-        addRow([] { return std::string("Show his thoughts: ") + (s_showThoughts ? "ON" : "OFF"); }, [] { s_showThoughts = !s_showThoughts; });
-        addRow([] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); }, [] { s_hitboxes = !s_hitboxes; if (auto p = pl()) p->refreshDebugDraw(); });
-        addRow([] { return std::string("Hitbox trail: ") + (s_trail ? "ON" : "OFF"); }, [] { s_trail = !s_trail; if (auto p = pl()) p->refreshDebugDraw(); });
-
-        float panelH = 70.f + m_rows.size() * 22.f;
-        auto panel = CCLayerColor::create({30, 22, 40, 235}, 300.f, panelH);
-        panel->setPosition({win.width / 2 - 150.f, win.height / 2 - panelH / 2});
-        this->addChild(panel);
-        auto face = CCSprite::create("coda-face.png"_spr);
-        if (face) { face->setScale(1.1f); face->setPosition({win.width / 2 - 110.f, win.height / 2 + panelH / 2 - 26.f}); this->addChild(face); }
-        auto title = CCLabelBMFont::create("Coda", "bigFont.fnt");
-        title->setScale(0.6f);
-        title->setAnchorPoint({0.f, 0.5f});
-        title->setPosition({win.width / 2 - 84.f, win.height / 2 + panelH / 2 - 26.f});
-        this->addChild(title);
-        auto menu = CCMenu::create();
-        menu->setPosition({0, 0});
-        this->addChild(menu);
-        float y = win.height / 2 + panelH / 2 - 60.f;
-        for (size_t i = 0; i < m_rows.size(); i++) {
-            auto lbl = CCLabelBMFont::create(m_rows[i].text().c_str(), "bigFont.fnt");
-            lbl->setScale(0.38f);
-            auto btn = CCMenuItemSpriteExtra::create(lbl, this, menu_selector(CodaMenu::onRow));
-            btn->setTag((int)i);
-            btn->setPosition({win.width / 2, y - i * 22.f});
-            menu->addChild(btn);
-            m_rows[i].label = lbl;
-        }
-        auto hint = CCLabelBMFont::create("~ to close", "chatFont.fnt");
-        hint->setScale(0.55f);
-        hint->setOpacity(160);
-        hint->setPosition({win.width / 2, win.height / 2 - panelH / 2 + 10.f});
-        this->addChild(hint);
-        return true;
-    }
-
-    void onRow(CCObject* sender) {
-        int i = static_cast<CCNode*>(sender)->getTag();
-        if (i < 0 || i >= (int)m_rows.size()) return;
-        m_rows[i].act();
-        for (auto& r : m_rows) if (r.label) r.label->setString(r.text().c_str());
-    }
-};
-CodaMenu* CodaMenu::s_open = nullptr;
-
-class $modify(CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double time) {
-        if (key == KEY_OEM3 && down && !repeat && PlayLayer::get()) { CodaMenu::toggle(); return true; }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, time);
-    }
-};
-
-// Pause menu: just one small button that opens the same menu.
+// Pause menu: a small Coda button that opens the menu.
 class $modify(CodaPauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
@@ -1615,19 +1450,19 @@ class $modify(CodaPauseLayer, PauseLayer) {
                                                  this, menu_selector(CodaPauseLayer::onCoda));
         btn->setPosition({win.width - 36.f, 46.f});
         menu->addChild(btn);
-        auto lbl = CCLabelBMFont::create("Coda (~)", "bigFont.fnt");
+        auto lbl = CCLabelBMFont::create(("Coda (" + cfg::keyName(cfg::find("menu-key") ? cfg::find("menu-key")->bind : 0) + ")").c_str(), "bigFont.fnt");
         lbl->setScale(0.25f);
         lbl->setPosition({win.width - 36.f, 18.f});
         this->addChild(lbl, 50);
     }
-    void onCoda(CCObject*) { CodaMenu::toggle(); }
+    void onCoda(CCObject*) { menu::toggle(); }
 };
 
 // Level page: "Analyze" next to the play button. Opens the level and goes straight into analysis.
 class $modify(CodaLevelInfoLayer, LevelInfoLayer) {
     bool init(GJGameLevel* level, bool challenge) {
         if (!LevelInfoLayer::init(level, challenge)) return false;
-        if (level && level->isPlatformer()) return true;
+        if (!V::analyzeButton || (level && level->isPlatformer())) return true;
         auto menu = CCMenu::create();
         auto face = CCSprite::create("coda-face.png"_spr);
         CCNode* art = face ? (CCNode*)face : (CCNode*)CCLabelBMFont::create("Coda", "bigFont.fnt");
@@ -1649,3 +1484,29 @@ class $modify(CodaLevelInfoLayer, LevelInfoLayer) {
         this->onPlay(nullptr);
     }
 };
+
+// ---------------------------------------------------------------- what the menu uses
+namespace bot {
+    bool enabled() { return s_enabled; }
+    bool simulating() { return s_sim; }
+    bool menuBlocksInput() { return menu::isOpen(); }
+    bool& fromBot() { return s_fromBot; }
+    bool usedHere() {
+        auto pl = PlayLayer::get();
+        return pl && static_cast<CodaPlayLayer*>(pl)->m_fields->used;
+    }
+    void setEnabled(bool on) {
+        auto p = static_cast<CodaPlayLayer*>(PlayLayer::get());
+        if (on) {
+            if (s_enabled) return;
+            s_enabled = true;
+            if (p) p->codaStart();
+        } else {
+            if (!s_enabled) return;
+            s_enabled = false;
+            if (s_auto) { s_auto = false; s_mode = s_modeBeforeAuto; }
+            if (p) p->codaStop();
+        }
+        if (p) { p->redrawPaths(); p->refreshDebugDraw(); }
+    }
+}
