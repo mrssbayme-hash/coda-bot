@@ -235,6 +235,21 @@ namespace cfg {
         add(B("show-thoughts", "Show his thoughts", "Coda Bot", &showThoughts, "", "pathfinder"));
         add(B("show-path", "Show his path", "Coda Bot", &showPath, "", "pathfinder"));
         add(B("analyze-button", "Analyze button on levels", "Coda Bot", &analyzeButton, "A Coda button on level pages that works out a route, then plays it."));
+        // Level Roulette (drawn by its own window)
+        add(I("rl-list", "List", "Roulette", &rlList, 0, 4));
+        add(I("rl-from", "From", "Roulette", &rlFrom, 1, 5000));
+        add(I("rl-to", "To", "Roulette", &rlTo, 1, 5000));
+        add(B("rl-limit-fps", "Max FPS/TPS needed", "Roulette", &rlLimitFps));
+        add(I("rl-max-fps", "Max FPS/TPS", "Roulette", &rlMaxFps, 30, 20000));
+        add(B("rl-skip-beaten", "Skip levels I've beaten", "Roulette", &rlSkipBeaten));
+        add(B("rl-skip-2p", "Skip 2-player levels", "Roulette", &rlSkip2P));
+        add(B("rl-auto-tps", "Set TPS to what the level needs", "Roulette", &rlAutoTps));
+        add(B("rl-roulette", "Roulette mode", "Roulette", &rlRoulette));
+        add(B("rl-len-0", "Tiny", "Roulette", &rlLen[0]));
+        add(B("rl-len-1", "Short", "Roulette", &rlLen[1]));
+        add(B("rl-len-2", "Medium", "Roulette", &rlLen[2]));
+        add(B("rl-len-3", "Long", "Roulette", &rlLen[3]));
+        add(B("rl-len-4", "XL", "Roulette", &rlLen[4]));
         // Menu
         add(C("accent", "Accent color", "Coda", &accent));
         add(C("bg", "Window color", "Coda", &bg));

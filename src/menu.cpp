@@ -26,7 +26,7 @@ namespace {
     ImFont* s_body = nullptr;
     ImFont* s_title = nullptr;
 
-    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Keybinds", "Coda"};
+    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Roulette", "Keybinds", "Coda"};
 
     ImU32 col(Col const& c, float alphaMul = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, c.a * alphaMul)); }
     ImVec4 v4(Col const& c, float a = -1.f) { return ImVec4(c.r, c.g, c.b, a < 0.f ? c.a : a); }
@@ -340,10 +340,11 @@ namespace {
             if (x + winW > io.DisplaySize.x - 8.f && i > 0) { x = 16.f; y += 340.f * scale; }
             ImVec2 def(x, y);
             x += winW + 12.f;
-            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0) continue;
+            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0 && std::strcmp(name, "Roulette") != 0) continue;
             ImGui::SetNextWindowPos(def, s_resetLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSizeConstraints(ImVec2(winW, 0.f), ImVec2(winW, io.DisplaySize.y - 20.f));
             bool kbWin = std::strcmp(name, "Keybinds") == 0;
+            if (std::strcmp(name, "Roulette") == 0) ImGui::SetNextWindowSizeConstraints(ImVec2(winW * 1.4f, 0.f), ImVec2(winW * 1.4f, io.DisplaySize.y - 20.f));
             if (kbWin) ImGui::SetNextWindowSizeConstraints(ImVec2(winW * 1.15f, 120.f), ImVec2(winW * 1.15f, io.DisplaySize.y * .7f));
             ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | (closing ? ImGuiWindowFlags_NoInputs : 0);
             if (s_title) ImGui::PushFont(s_title, 0.f);
@@ -355,6 +356,7 @@ namespace {
                 if (std::strcmp(name, "Coda Bot") == 0 && !s_search[0]) botControls();
                 if (std::strcmp(name, "Coda") == 0 && !s_search[0]) codaStatus();
                 if (std::strcmp(name, "Keybinds") == 0) keybindsWindow();
+                else if (std::strcmp(name, "Roulette") == 0) roulette::drawWindow();
                 else drawFields(name);
                 if (std::strcmp(name, "Bypass") == 0 && !hacks::tpsSupported())
                     ImGui::TextColored(ImVec4(1.f, .6f, .4f, 1.f), "TPS bypass needs Steam GD 2.2091.");

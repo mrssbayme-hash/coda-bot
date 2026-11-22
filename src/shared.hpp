@@ -68,3 +68,8 @@ namespace hacks {
 namespace safe {
     bool cheatedThisRun();
 }
+
+// Level Roulette (roulette.cpp)
+namespace roulette {
+    void drawWindow();
+}

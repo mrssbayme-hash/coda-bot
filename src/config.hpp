@@ -88,6 +88,10 @@ namespace V {
     inline bool autoclicker = false, acP2 = false;
     inline int acHold = 2, acRelease = 2;
     inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = false;
+    // Level Roulette
+    inline int rlList = 0, rlFrom = 1, rlTo = 150, rlMaxFps = 240;
+    inline bool rlLimitFps = false, rlSkipBeaten = true, rlSkip2P = false, rlAutoTps = false, rlRoulette = false;
+    inline bool rlLen[5] = {true, true, true, true, true};
     // Menu
     inline Col accent{.965f, .635f, .71f, 1.f};
     inline Col bg{.11f, .086f, .133f, .94f};
