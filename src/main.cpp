@@ -12,6 +12,7 @@
 #include <functional>
 #include <chrono>
 #include <unordered_set>
+#include <cstring>
 #include <algorithm>
 
 using namespace geode::prelude;
@@ -100,6 +101,47 @@ static int const PLAN_STEPS = 8;      // physics steps per decision (1/30 s)
 static bool s_trail = false;
 static int perGen() { return std::max(1, (int)Mod::get()->getSettingValue<int64_t>("attempts-per-generation")); }
 static int oldPathCount() { return std::max(0, (int)Mod::get()->getSettingValue<int64_t>("old-paths")); }
+// ---------------------------------------------------------------- physics hertz (TPS) bypass
+// GD 2.2091 runs physics at 240 steps a second, set by two constants used in GJBaseGameLayer:
+//   getModifiedDelta:  timestep = 1/240        (instruction at 0x340671)
+//   update:            steps    = delta*60*4.0 (instruction at 0x340900)
+// We point those two instructions at our own values (stored in unused padding bytes),
+// so the original constants that other code shares stay untouched.
+static int s_tps = 240;
+static std::vector<Patch*> s_tpsPatches;
+static bool s_tpsBroken = false;
+static int const TPS_STEPS[] = {240, 60, 120, 144, 165, 360, 480, 1000};
+
+static bool setTps(int tps) {
+    if (s_tpsBroken) return false;
+    uintptr_t base = geode::base::get();
+    auto bytesOf = [](auto v) { ByteVector b(sizeof(v)); std::memcpy(b.data(), &v, sizeof(v)); return b; };
+    if (s_tpsPatches.empty()) {
+        // only patch the exact build we expect (Steam 2.2091)
+        static unsigned char const want1[] = {0xf2, 0x0f, 0x59, 0x3d, 0xc7, 0x49, 0x4f, 0x00};
+        static unsigned char const want2[] = {0xf2, 0x0f, 0x59, 0x0d, 0xe8, 0x49, 0x4f, 0x00};
+        auto pad1 = reinterpret_cast<unsigned char*>(base + 0x3406c8);
+        auto pad2 = reinterpret_cast<unsigned char*>(base + 0x33cf38);
+        bool ok = std::memcmp((void*)(base + 0x340671), want1, 8) == 0 && std::memcmp((void*)(base + 0x340900), want2, 8) == 0;
+        for (int i = 0; i < 8 && ok; i++) ok = pad1[i] == 0xcc && pad2[i] == 0xcc;
+        if (!ok) { s_tpsBroken = true; return false; }
+        auto add = [&](uintptr_t rva, ByteVector b) {
+            auto r = Mod::get()->patch((void*)(base + rva), b);
+            if (r.isOk()) s_tpsPatches.push_back(r.unwrap()); else s_tpsBroken = true;
+        };
+        add(0x3406c8, bytesOf(1.0 / 240.0));
+        add(0x33cf38, bytesOf(4.0));
+        add(0x340675, bytesOf((int32_t)(0x3406c8 - 0x340679)));
+        add(0x340904, bytesOf((int32_t)(0x33cf38 - 0x340908)));
+        if (s_tpsBroken) return false;
+    }
+    (void)s_tpsPatches[0]->updateBytes(bytesOf(1.0 / (double)tps));
+    (void)s_tpsPatches[1]->updateBytes(bytesOf((double)tps / 60.0));
+    for (auto p : s_tpsPatches) (void)p->toggle(tps != 240);
+    s_tps = tps;
+    return true;
+}
+
 static void applyFps() {
     if (!Mod::get()->getSettingValue<bool>("fps-bypass")) return;
     double fps = (double)std::max<int64_t>(30, Mod::get()->getSettingValue<int64_t>("fps"));
@@ -240,6 +282,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         CCNode* bubble = nullptr;
         CCLayerColor* bubbleBg = nullptr;
         CCLabelBMFont* bubbleText = nullptr;
+        bool tpsUsed = false;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -248,6 +291,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
         this->buildHud();
         applyFps();
+        if (s_tps == 240) {
+            int saved = (int)Mod::get()->getSavedValue<int64_t>("tps", 240);
+            if (saved != 240) setTps(saved);
+        }
+        if (s_tps != 240) { m_isTestMode = true; m_fields->tpsUsed = true; }
         auto f = m_fields.self();
         f->paths = CCDrawNode::create();
         f->live = CCDrawNode::create();
@@ -268,6 +316,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->bubble->setVisible(false);
         if (m_objectLayer) m_objectLayer->addChild(f->bubble, 9100);
         if (s_enabled) this->codaStart();
+        if (m_fields->tpsUsed) this->say("Physics at " + std::to_string(s_tps) + " Hz: practice only, progress won't save.", 3.f);
         return true;
     }
 
@@ -1303,6 +1352,17 @@ public:
             for (auto v : steps) if (v > cur) { next = v; break; }
             (void)Mod::get()->setSettingValue<int64_t>("fps", next);
             applyFps();
+        });
+        addRow([] {
+            if (s_tpsBroken) return std::string("Physics Hz bypass: not supported on this GD version");
+            return "Physics Hz (TPS): " + std::to_string(s_tps) + (s_tps == 240 ? " (normal)" : " (practice only)");
+        }, [] {
+            int next = 240;
+            for (size_t i = 0; i < std::size(TPS_STEPS); i++) if (TPS_STEPS[i] == s_tps) { next = TPS_STEPS[(i + 1) % std::size(TPS_STEPS)]; break; }
+            if (setTps(next)) {
+                (void)Mod::get()->setSavedValue<int64_t>("tps", next);
+                if (auto p = pl(); p && next != 240) { p->m_isTestMode = true; p->m_fields->tpsUsed = true; }
+            }
         });
         addRow([] { return std::string("Show his thoughts: ") + (s_showThoughts ? "ON" : "OFF"); }, [] { s_showThoughts = !s_showThoughts; });
         addRow([] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); }, [] { s_hitboxes = !s_hitboxes; if (auto p = pl()) p->refreshDebugDraw(); });
