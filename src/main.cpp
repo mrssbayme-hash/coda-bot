@@ -40,7 +40,15 @@ struct Brain {
     int skipUntil = -1;                          // skip ahead until this generation is done
     bool finalExam = false;                      // Perfect: beat it with checkpoints, now prove it from the start
     bool examRun = false;                        // this attempt is the first full run of the final exam
+    // Perfect: pathfinding. A decision every few units (hold or let go), each with a checkpoint
+    // so he can back up and try the other choice when a branch dies.
+    struct Node { float x; bool press; unsigned char tried; bool cp; };
+    std::vector<Node> nodes;
+    bool pfFailed = false;
+    int pfDeaths = 0;
 };
+static float const PF_STEP = 12.f;     // units between decisions
+static int const PF_WINDOW = 48;       // how many decisions back he can rewind
 
 // ---------------------------------------------------------------- learning modes
 struct Mode {
@@ -78,6 +86,17 @@ static void applyFps() {
     CCDirector::get()->setAnimationInterval(1.0 / fps);
 }
 static Mode const& mode() { return MODES[s_mode]; }
+static bool pathfinding(Brain const& b) { return mode().perfect && !b.finalExam && !b.pfFailed; }
+static std::vector<Hold> holdsFrom(std::vector<Brain::Node> const& nodes) {
+    std::vector<Hold> out;
+    for (size_t i = 0; i < nodes.size(); i++) {
+        if (!nodes[i].press) continue;
+        float end = i + 1 < nodes.size() ? nodes[i + 1].x : nodes[i].x + PF_STEP;
+        if (!out.empty() && std::abs(out.back().end - nodes[i].x) < 0.5f) out.back().end = end;
+        else out.push_back({nodes[i].x, end});
+    }
+    return out;
+}
 
 static std::unordered_map<std::string, Brain> s_brains;
 static bool s_enabled = false;   // Coda is playing
@@ -254,8 +273,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->removeAllCheckpoints();
         b.cpX = 0.f;
         if (!mode().perfect && b.finalExam) { b.finalExam = false; b.examRun = false; b.noCpBefore = 0.f; }
+        if (!mode().perfect) { b.pfFailed = false; b.nodes.clear(); }
         bool practice = mode().checkpoints && !b.finalExam;
         b.confirm = practice && b.bestX > 0.f;
+        if (pathfinding(b)) { b.nodes.clear(); b.confirm = false; b.pfDeaths = 0; }
         if (m_isPracticeMode != practice) this->togglePracticeMode(practice);
     }
 
@@ -295,6 +316,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         if (!s_enabled || m_isPlatformer || !m_player1 || m_player1->m_isDead) return;
         float x = m_player1->m_position.x;
+        auto& b = this->brain();
+        if (pathfinding(b) && m_isPracticeMode) { this->pfStep(x); return; }
         auto& p = f->play;
         while (f->idx < p.size() && p[f->idx].end <= x) f->idx++;
         bool want = f->idx < p.size() && p[f->idx].start <= x && x < p[f->idx].end;
@@ -307,8 +330,75 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
     }
 
+    void pfStep(float x) {
+        auto f = m_fields.self();
+        auto& b = this->brain();
+        if (b.nodes.empty() || x >= b.nodes.back().x + PF_STEP) {
+            bool prev = !b.nodes.empty() && b.nodes.back().press;
+            Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false};
+            this->markCheckpoint();
+            n.cp = true;
+            int cps = 0;
+            for (auto& o : b.nodes) if (o.cp) cps++;
+            if (cps >= PF_WINDOW) {
+                this->removeCheckpoint(true);
+                for (auto& o : b.nodes) if (o.cp) { o.cp = false; break; }
+            }
+            b.nodes.push_back(n);
+        }
+        bool want = b.nodes.back().press;
+        if (want != f->held) {
+            s_fromBot = true;
+            this->handleButton(want, 1, true);
+            s_fromBot = false;
+            f->held = want;
+            if (want && s_training) f->curClicks.push_back(this->playerPos());
+        }
+    }
+
+    // A branch died: rewind to the latest decision that still has an untried choice.
+    void pfDeath(float x, float pct) {
+        auto& b = this->brain();
+        this->release();
+        b.pfDeaths++;
+        if (x > b.bestX + 0.5f) {
+            b.bestX = x; b.bestPct = pct; b.pfDeaths = 0;
+            this->m_fields->smugTime = 1.f;
+        }
+        while (b.pfDeaths <= 900 && !b.nodes.empty()) {
+            auto& n = b.nodes.back();
+            if (!n.cp) break;                              // too far back to rewind
+            if (n.tried != 3) {
+                n.press = !(n.tried & 2) ? true : false;   // try the choice not tried yet
+                n.tried |= n.press ? 2 : 1;
+                return;                                    // GD respawns at this decision's checkpoint
+            }
+            b.nodes.pop_back();
+            this->removeCheckpoint(false);
+        }
+        if (b.pfDeaths > 900 || b.nodes.empty() || !b.nodes.back().cp) {
+            // Every choice within reach dies: the real mistake is further back. Learn it the slow way.
+            b.pfFailed = true;
+            b.best = holdsFrom(b.nodes);
+            b.nodes.clear();
+            this->removeAllCheckpoints();
+            b.cpX = 0.f;
+            b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, 0.f, true);
+            say("Pathfinding hit a dead end. Learning this part by trying instead.", 3.f);
+        }
+    }
+
     void resetLevel() {
         PlayLayer::resetLevel();
+        if (s_enabled && !m_isPlatformer && pathfinding(this->brain()) && m_isPracticeMode) {
+            auto f = m_fields.self();
+            s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
+            f->held = false;
+            f->cur.clear(); f->curClicks.clear();
+            if (f->live) f->live->clear();
+            for (auto& pt : this->brain().bestPath) { if (pt.x < this->playerPos().x) f->cur.push_back(pt); else break; }
+            return;
+        }
         auto f = m_fields.self();
         f->idx = 0;
         f->held = false;
@@ -343,7 +433,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void onCodaDeath(float x, float pct) {
         auto& b = this->brain();
         float oldBest = b.bestX;
-        this->learnFromDeath(x, pct);
+        if (pathfinding(b) && m_isPracticeMode) this->pfDeath(x, pct);
+        else this->learnFromDeath(x, pct);
         this->trainingBookkeeping(x, pct, b.bestX > oldBest + 0.5f);
     }
 
@@ -541,6 +632,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         // Blocked: no completion, no rewards, no verifying.
         if (s_enabled) {
             auto& b = this->brain();
+            if (pathfinding(b)) { f->play = holdsFrom(b.nodes); b.nodes.clear(); }
             b.beaten = true;
             b.bestPct = 100.f;
             b.best = f->play;
@@ -555,7 +647,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 b.cpX = 0.f;
                 b.noCpBefore = 1e9f;
                 f->exitPractice = true;
-                say("Got it with checkpoints. Now the whole thing, no checkpoints.", 3.f);
+                say("Found a path. Now the whole thing from the start, no checkpoints.", 3.f);
             } else {
                 if (mode().perfect) say("Perfect run. From the start, no mistakes. (Doesn't count.)", 4.f);
                 if (s_auto) this->finishAuto();
@@ -624,7 +716,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->face) f->face->setPosition({x0 + w * now, y0 + h / 2});
         f->pct->setString((std::to_string((int)(now * 100)) + "%").c_str());
         std::string info = "Best " + std::to_string((int)b.bestPct) + "%   Attempt " + std::to_string(b.attempts) +
-            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + "]" +
+            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + (pathfinding(b) ? ": pathfinding" : (b.finalExam && !b.beaten ? ": full run" : "")) + "]" +
             (s_auto ? "   AUTO TRAIN " + std::to_string((int)s_turbo) + "x" : "");
         f->info->setString(info.c_str());
 
