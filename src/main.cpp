@@ -502,8 +502,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
             }
             if (b.routeMode && x >= b.routeToX) b.routeMode = 0;
             Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false, onGround || !groundMode, m_player1->m_position.y};
-            this->markCheckpoint();
-            n.cp = true;
+            int before = m_checkpointArray ? (int)m_checkpointArray->count() : -1;
+            auto made = this->markCheckpoint();
+            int after = m_checkpointArray ? (int)m_checkpointArray->count() : -1;
+            n.cp = made != nullptr && after > before;
+            if (!n.cp) log::warn("[pf] checkpoint refused at x={:.1f} (array {} -> {})", x, before, after);
             int cps = 0;
             for (auto& o : b.nodes) if (o.cp) cps++;
             if (cps >= PF_WINDOW) {
@@ -511,6 +514,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 for (auto& o : b.nodes) if (o.cp) { o.cp = false; break; }
             }
             b.nodes.push_back(n);
+            log::debug("[pf] node #{} x={:.1f} y={:.1f} ground={} press={} gdCps={}", b.nodes.size(), x, n.y, n.ground, n.press,
+                       m_checkpointArray ? (int)m_checkpointArray->count() : -1);
         }
         bool want = !b.nodes.empty() && b.nodes.back().press;
         if (want != f->held) {
@@ -525,6 +530,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // A branch died: rewind to the latest decision that still has an untried choice.
     void pfDeath(float x, float pct) {
         auto& b = this->brain();
+        log::info("[pf] death x={:.1f} pct={:.1f} nodes={} ourCps={} gdCps={} same={} top=({:.1f}, tried={}, cp={})", x, pct, b.nodes.size(),
+                  std::count_if(b.nodes.begin(), b.nodes.end(), [](auto& n) { return n.cp; }),
+                  m_checkpointArray ? (int)m_checkpointArray->count() : -1, b.sameCount,
+                  b.nodes.empty() ? 0.f : b.nodes.back().x, b.nodes.empty() ? 0 : (int)b.nodes.back().tried, b.nodes.empty() ? false : b.nodes.back().cp);
         this->release();
         b.pfDeaths++;
         if (x > b.bestX + 0.5f) {
@@ -552,7 +561,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             while (i > 0 && b.nodes[i].x > target) i--;
             while (i > 0 && b.nodes[i].tried == 3 && !newRoute) i--;
             if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp) {
-                while ((int)b.nodes.size() > i + 1) { b.nodes.pop_back(); this->removeCheckpoint(false); }
+                while ((int)b.nodes.size() > i + 1) { bool hc = b.nodes.back().cp; b.nodes.pop_back(); if (hc) this->removeCheckpoint(false); }
                 auto& n = b.nodes.back();
                 if (newRoute) {
                     b.routeTries++;
@@ -584,7 +593,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (i > 0) i--;                                       // the takeoff itself
             while (i > 0 && b.nodes[i].tried == 3) i--;           // earlier ground choices if the takeoff is used up
             if (i < b.nodes.size() && b.nodes[i].cp && b.nodes[i].tried != 3) {
-                while (b.nodes.size() > i + 1) { b.nodes.pop_back(); this->removeCheckpoint(false); }
+                while (b.nodes.size() > i + 1) { bool hc = b.nodes.back().cp; b.nodes.pop_back(); if (hc) this->removeCheckpoint(false); }
                 auto& n = b.nodes.back();
                 n.press = !(n.tried & 2);
                 n.tried |= n.press ? 2 : 1;
@@ -594,15 +603,16 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
         while ((s_pathOnly || b.pfDeaths <= 900) && !b.nodes.empty()) {
             auto& n = b.nodes.back();
-            if (!n.cp) break;                              // too far back to rewind
+            if (!n.cp) { b.nodes.pop_back(); continue; }   // no checkpoint here: can't respawn at it
             if (n.tried != 3) {
                 n.press = !(n.tried & 2) ? true : false;   // try the choice not tried yet
                 n.tried |= n.press ? 2 : 1;
                 s_thought = "That branch died. Going back " + std::to_string((int)(x - n.x)) + " units and trying " + (n.press ? "holding." : "letting go.");
                 return;                                    // GD respawns at this decision's checkpoint
             }
+            bool hadCp = b.nodes.back().cp;
             b.nodes.pop_back();
-            this->removeCheckpoint(false);
+            if (hadCp) this->removeCheckpoint(false);
         }
         if ((!s_pathOnly && b.pfDeaths > 900) || b.nodes.empty() || !b.nodes.back().cp) {
             // Every choice within reach dies: the real mistake is further back. Learn it the slow way.
@@ -621,6 +631,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         PlayLayer::resetLevel();
         if (s_enabled && !m_isPlatformer && pathfinding(this->brain()) && m_isPracticeMode) {
             auto f = m_fields.self();
+            log::info("[pf] respawn at x={:.1f} (top node x={:.1f})", m_player1 ? m_player1->m_position.x : -1.f,
+                      this->brain().nodes.empty() ? -1.f : this->brain().nodes.back().x);
             s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
             f->held = false;
             f->cur.clear(); f->curClicks.clear();
