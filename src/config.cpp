@@ -161,7 +161,18 @@ namespace cfg {
         add(on(cheat(B("hitboxes", "Show hitboxes", "Player", &hitboxes, "Doesn't count as a cheat in practice mode."),
             [] { auto pl = PlayLayer::get(); return V::hitboxes && !(pl && pl->m_isPracticeMode); }), [] { hacks::refreshHitboxes(); }));
         add(on(B("hitboxes-death", "Only on death", "Player", &hitboxesOnDeath, "", "hitboxes"), [] { hacks::refreshHitboxes(); }));
-        add(on(B("hitbox-trail", "Hitbox trail", "Player", &hitboxTrail, "", "hitboxes"), [] { hacks::refreshHitboxes(); }));
+        add(B("hitbox-accurate", "Accurate player hitbox", "Player", &hitboxAccurate, "Draws your real hitbox (yellow) and the small inner one that solid blocks use (pink).", "hitboxes"));
+        add(B("hitbox-hide-rotated", "Hide rotated hitbox", "Player", &hitboxHideRotated, "GD's own player box spins with your icon. This hides it.", "hitboxes"));
+        add(B("hitbox-trail", "Hitbox trail", "Player", &hitboxTrail, "Leaves your hitbox behind on every physics step.", "hitboxes"));
+        add(I("hitbox-trail-len", "Trail length (steps)", "Player", &hitboxTrailLen, 10, 2000, "hitboxes"));
+        add(F("hitbox-width", "Border width", "Player", &hitboxWidth, .2f, 4.f, "%.1fx", "hitboxes"));
+        add(B("hitbox-fill", "Fill hitboxes", "Player", &hitboxFill, "", "hitboxes"));
+        add(F("hitbox-fill-alpha", "Fill opacity", "Player", &hitboxFillAlpha, 0.f, 1.f, "%.2f", "hitboxes"));
+        add(C("hb-solid", "Solid color", "Player", &hbSolid, "hitboxes"));
+        add(C("hb-danger", "Danger color", "Player", &hbDanger, "hitboxes"));
+        add(C("hb-player", "Player color", "Player", &hbPlayer, "hitboxes"));
+        add(C("hb-inner", "Inner player color", "Player", &hbInner, "hitboxes"));
+        add(C("hb-other", "Other color", "Player", &hbOther, "hitboxes"));
         add(B("solid-wave", "Solid wave trail", "Player", &solidWave));
         add(cheat(B("trajectory", "Show trajectory", "Player", &trajectory, "Shows where you'd go if you hold (pink) or let go (white).")));
         add(I("trajectory-len", "Length (steps)", "Player", &trajLen, 30, 480, "trajectory"));

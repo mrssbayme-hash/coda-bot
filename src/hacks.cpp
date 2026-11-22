@@ -10,6 +10,7 @@
 #include <Geode/modify/CCTransitionFade.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/GameObject.hpp>
+#include <Geode/modify/CCDrawNode.hpp>
 #include <chrono>
 #include <cstring>
 #include <algorithm>
@@ -144,6 +145,51 @@ namespace hacks {
         s_stats.startposCount = n;
     }
 
+    // ------------------------------------------------------------ hitbox drawing
+    // Like Mega Hack and OpenHack: GD draws the level's hitboxes, we recolor them, and we add the
+    // player's real hitbox (the box that hits spikes) plus the small inner box that hits solid blocks.
+    struct HB { CCRect outer, inner; };
+    static std::deque<HB> s_trail[2];
+    static bool s_skipRecolor = false;
+    static CCRect inner(PlayerObject* p) {
+        CCRect r = p->getObjectRect();
+        float k = p->m_vehicleSize >= 1.f ? .25f : .4f;
+        float w = r.size.width * k, h = r.size.height * k;
+        return CCRect(r.origin.x + (r.size.width - w) / 2.f, r.origin.y + (r.size.height - h) / 2.f, w, h);
+    }
+    static bool hitboxesNow() {
+        auto pl = PlayLayer::get();
+        return pl && V::hitboxes && (!V::hitboxesOnDeath || (pl->m_player1 && pl->m_player1->m_isDead));
+    }
+    static ccColor4F c4(Col const& c, float a) { return ccc4f(c.r, c.g, c.b, a); }
+    static void box(CCDrawNode* n, CCRect const& r, Col const& c) {
+        CCPoint v[4] = {ccp(r.getMinX(), r.getMinY()), ccp(r.getMinX(), r.getMaxY()), ccp(r.getMaxX(), r.getMaxY()), ccp(r.getMaxX(), r.getMinY())};
+        s_skipRecolor = true;
+        n->drawPolygon(v, 4, c4(c, V::hitboxFill ? V::hitboxFillAlpha : 0.f), .25f * V::hitboxWidth, c4(c, c.a));
+        s_skipRecolor = false;
+    }
+    static void recordTrail(PlayLayer* pl) {
+        if (!V::hitboxes || !V::hitboxTrail) { s_trail[0].clear(); s_trail[1].clear(); return; }
+        PlayerObject* ps[2] = {pl->m_player1, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr};
+        for (int i = 0; i < 2; i++) {
+            if (ps[i] && !ps[i]->m_isDead) s_trail[i].push_back({ps[i]->getObjectRect(), inner(ps[i])});
+            while ((int)s_trail[i].size() > V::hitboxTrailLen) s_trail[i].pop_front();
+        }
+    }
+    static void drawPlayerHitboxes(PlayLayer* pl) {
+        auto n = pl->m_debugDrawNode;
+        if (!n || !hitboxesNow()) return;
+        n->setVisible(true);
+        if (V::hitboxTrail) for (auto& t : s_trail) for (auto& h : t) { box(n, h.outer, V::hbPlayer); box(n, h.inner, V::hbInner); }
+        if (V::hitboxAccurate) {
+            for (auto p : {pl->m_player1, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr}) {
+                if (!p) continue;
+                box(n, p->getObjectRect(), V::hbPlayer);
+                box(n, inner(p), V::hbInner);
+            }
+        }
+    }
+
     // ------------------------------------------------------------ layout mode
     static bool s_needRestart = false;
     void reopenLevel() { if (PlayLayer::get()) s_needRestart = true; }
@@ -249,6 +295,7 @@ class $modify(HackPlayLayer, PlayLayer) {
         f->points.clear();
         if (f->trail) f->trail->clear();
         f->cpTimer = 0.f;
+        s_trail[0].clear(); s_trail[1].clear();
         f->frameBase = m_gameState.m_currentProgress;
         s_stats.deadFrames = 0;
         s_stats.totalFrames = 0;
@@ -277,15 +324,6 @@ class $modify(HackPlayLayer, PlayLayer) {
         if (V::hitboxes && (!V::hitboxesOnDeath || (m_player1 && m_player1->m_isDead))) return true;
         return PlayLayer::shouldDrawDebugHitboxes();
     }
-    bool shouldDrawHitboxTrail() {
-        if (V::hitboxes && V::hitboxTrail) return true;
-        return PlayLayer::shouldDrawHitboxTrail();
-    }
-    bool shouldRecordHitboxTrail() {
-        if (V::hitboxes && V::hitboxTrail) return true;
-        return PlayLayer::shouldRecordHitboxTrail();
-    }
-
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
         auto f = m_fields.self();
@@ -319,7 +357,7 @@ class $modify(HackPlayLayer, PlayLayer) {
             if (m_background) m_background->setColor({40, 125, 255});
             if (m_middleground) m_middleground->setVisible(false);
         }
-        if (V::hitboxes && m_debugDrawNode && !m_debugDrawNode->isVisible()) m_debugDrawNode->setVisible(true);
+        drawPlayerHitboxes(this);
         // auto checkpoints
         if (V::autoCheckpoints && m_isPracticeMode && m_player1 && !m_player1->m_isDead && !m_isPaused) {
             f->cpTimer += dt;
@@ -443,6 +481,38 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) recordTrail(pl);
+    }
+};
+
+// GD's own hitbox drawing: recolor it, and fix the negative border width GD uses after a mirror portal
+class $modify(HitboxDraw, CCDrawNode) {
+    bool recolor(ccColor4F& fill, float& width, ccColor4F& border) {
+        if (s_skipRecolor) return true;
+        auto pl = PlayLayer::get();
+        if (!pl || this != pl->m_debugDrawNode || !V::hitboxes) return true;
+        Col const* c;
+        bool player = false;
+        if (border.r == 0.f) c = border.b == 1.f ? &V::hbSolid : &V::hbOther;
+        else if (border.g == 1.f) { c = &V::hbPlayer; player = true; }
+        else c = &V::hbDanger;
+        if (player && V::hitboxHideRotated) return false;
+        border = ccc4f(c->r, c->g, c->b, c->a);
+        width *= V::hitboxWidth;
+        fill = V::hitboxFill ? ccc4f(c->r, c->g, c->b, V::hitboxFillAlpha) : fill;
+        return true;
+    }
+    bool drawPolygon(CCPoint* verts, unsigned int count, ccColor4F const& fillColor, float borderWidth, ccColor4F const& borderColor, BorderAlignment align) {
+        ccColor4F f = fillColor, b = borderColor;
+        float w = std::abs(borderWidth);
+        if (!this->recolor(f, w, b)) return true;
+        return CCDrawNode::drawPolygon(verts, count, f, w, b, align);
+    }
+    bool drawCircle(CCPoint const& pos, float radius, ccColor4F const& color, float borderWidth, ccColor4F const& borderColor, unsigned int segments) {
+        ccColor4F f = color, b = borderColor;
+        float w = std::abs(borderWidth);
+        if (!this->recolor(f, w, b)) return true;
+        return CCDrawNode::drawCircle(pos, radius, f, w, b, segments);
     }
 };
 

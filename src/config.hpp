@@ -51,6 +51,11 @@ namespace V {
     inline bool noDeathEffect = false, respawnDelayOn = false, noRespawnBlink = false, hidePlayer = false;
     inline float respawnDelay = .5f;
     inline bool hitboxes = false, hitboxesOnDeath = false, hitboxTrail = false;
+    inline bool hitboxAccurate = true, hitboxHideRotated = true, hitboxFill = false;
+    inline int hitboxTrailLen = 240;
+    inline float hitboxFillAlpha = .3f, hitboxWidth = 1.f;
+    inline Col hbSolid{0.f, .247f, 1.f, 1.f}, hbDanger{1.f, 0.f, 0.f, 1.f}, hbPlayer{1.f, 1.f, 0.f, 1.f},
+        hbInner{1.f, 0.f, .5f, 1.f}, hbOther{0.f, 1.f, 0.f, 1.f};
     inline bool solidWave = false;
     inline bool trajectory = false;
     inline int trajLen = 120;
