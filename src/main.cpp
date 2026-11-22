@@ -52,6 +52,7 @@ struct Brain {
     std::vector<CCRect> orbs;    // orb hitboxes: the only places a mid-air click matters for cube/ball/robot/spider
     float sameX = -1e9f;         // where he keeps dying
     int sameCount = 0;
+    int flyBackups = 0;          // how many times he's backed up at this same spot while flying
     std::vector<Node> nodes;
     bool pfFailed = false;
     int pfDeaths = 0;
@@ -506,12 +507,33 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->release();
         b.pfDeaths++;
         if (x > b.bestX + 0.5f) {
-            b.bestX = x; b.bestPct = pct; b.pfDeaths = 0;
+            b.bestX = x; b.bestPct = pct; b.pfDeaths = 0; b.flyBackups = 0;
             this->m_fields->smugTime = 1.f;
         }
         if (std::abs(x - b.sameX) < 30.f) b.sameCount++;
         else { b.sameX = x; b.sameCount = 1; }
-        if (b.sameCount >= 10) {
+        int im = m_player1 ? this->iconOf(m_player1) : 0;
+        bool flying = im == 1 || im == 3 || im == 4 || im == 5 || im == 7;   // ship, UFO, wave, robot, swing
+        if (b.sameCount >= 10 && flying) {
+            // Flying: the mistake usually happened well before the thing he hits (momentum).
+            // Back up a good distance, and further each time he's still stuck here.
+            b.sameCount = 0;
+            b.flyBackups++;
+            float back = (im == 1 ? 180.f : im == 4 ? 120.f : 150.f) * b.flyBackups;
+            float target = x - back;
+            int i = (int)b.nodes.size() - 1;
+            while (i > 0 && b.nodes[i].x > target) i--;
+            while (i > 0 && b.nodes[i].tried == 3) i--;
+            if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp && b.nodes[i].tried != 3) {
+                while ((int)b.nodes.size() > i + 1) { b.nodes.pop_back(); this->removeCheckpoint(false); }
+                auto& n = b.nodes.back();
+                n.press = !(n.tried & 2);
+                n.tried |= n.press ? 2 : 1;
+                s_thought = "Keep hitting the same thing. Backing up " + std::to_string((int)(x - n.x)) + " units and flying it differently.";
+                return;
+            }
+        }
+        if (b.sameCount >= 10 && !flying) {
             // Died 10 times on the same jump: go back to where he last stood on the ground before it
             // (the takeoff) and rethink from there.
             b.sameCount = 0;
