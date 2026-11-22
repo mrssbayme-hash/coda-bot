@@ -472,7 +472,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             auto r = m_player1->getObjectRect();
             for (auto& o : b.orbs) if (std::abs(o.getMidX() - r.getMidX()) < 60.f && std::abs(o.getMidY() - r.getMidY()) < 60.f) { orbNear = true; break; }
         }
-        bool decide = !groundMode || onGround || orbNear;
+        bool decide = !groundMode || onGround || orbNear || b.nodes.empty();   // always have a first decision
         if (decide && (b.nodes.empty() || x >= b.nodes.back().x + PF_STEP)) {
             bool prev = !b.nodes.empty() && b.nodes.back().press;
             if (!b.guide.empty()) {                         // follow the path he found before, first
@@ -490,7 +490,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             }
             b.nodes.push_back(n);
         }
-        bool want = b.nodes.back().press;
+        bool want = !b.nodes.empty() && b.nodes.back().press;
         if (want != f->held) {
             s_fromBot = true;
             this->handleButton(want, 1, true);
