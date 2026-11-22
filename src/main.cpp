@@ -48,11 +48,14 @@ struct Brain {
     bool examRun = false;                        // this attempt is the first full run of the final exam
     // Perfect: pathfinding. A decision every few units (hold or let go), each with a checkpoint
     // so he can back up and try the other choice when a branch dies.
-    struct Node { float x; bool press; unsigned char tried; bool cp; bool ground; };
+    struct Node { float x; bool press; unsigned char tried; bool cp; bool ground; float y; };
     std::vector<CCRect> orbs;    // orb hitboxes: the only places a mid-air click matters for cube/ball/robot/spider
     float sameX = -1e9f;         // where he keeps dying
     int sameCount = 0;
     int flyBackups = 0;          // how many times he's backed up at this same spot while flying
+    int routeMode = 0;           // 0 = none, 1 = high route, 2 = low route
+    int routeTries = 0;
+    float routeY = 0.f, routeToX = 0.f;
     std::vector<Node> nodes;
     bool pfFailed = false;
     int pfDeaths = 0;
@@ -480,7 +483,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 prev = false;
                 for (auto& h : b.guide) if (h.start <= x && x < h.end) { prev = true; break; }
             }
-            Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false, onGround || !groundMode};
+            if (b.routeMode && x < b.routeToX && !groundMode) {
+                // Taking a different route: steer toward the route's height by default.
+                float y = m_player1->m_position.y;
+                bool up = y < b.routeY;
+                prev = m_player1->m_isUpsideDown ? !up : up;
+            }
+            if (b.routeMode && x >= b.routeToX) b.routeMode = 0;
+            Brain::Node n{x, prev, (unsigned char)(prev ? 2 : 1), false, onGround || !groundMode, m_player1->m_position.y};
             this->markCheckpoint();
             n.cp = true;
             int cps = 0;
@@ -507,7 +517,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         this->release();
         b.pfDeaths++;
         if (x > b.bestX + 0.5f) {
-            b.bestX = x; b.bestPct = pct; b.pfDeaths = 0; b.flyBackups = 0;
+            b.bestX = x; b.bestPct = pct; b.pfDeaths = 0; b.flyBackups = 0; b.routeTries = 0;
             this->m_fields->smugTime = 1.f;
         }
         if (std::abs(x - b.sameX) < 30.f) b.sameCount++;
@@ -516,21 +526,42 @@ class $modify(CodaPlayLayer, PlayLayer) {
         bool flying = im == 1 || im == 3 || im == 4 || im == 5 || im == 7;   // ship, UFO, wave, robot, swing
         if (b.sameCount >= 10 && flying) {
             // Flying: the mistake usually happened well before the thing he hits (momentum).
-            // Back up a good distance, and further each time he's still stuck here.
+            // Back up in steps (ship: 130, then 180, 260, 360). If he's still stuck after all of those,
+            // take a different route: go back further and fly a high or low line into the same area.
             b.sameCount = 0;
-            b.flyBackups++;
-            float back = (im == 1 ? 180.f : im == 4 ? 120.f : 150.f) * b.flyBackups;
+            static float const SHIP[] = {130.f, 180.f, 260.f, 360.f};
+            static float const WAVE[] = {90.f, 120.f, 180.f, 260.f};
+            static float const OTHER[] = {110.f, 150.f, 220.f, 320.f};
+            float const* steps = im == 1 ? SHIP : im == 4 ? WAVE : OTHER;
+            bool newRoute = b.flyBackups >= 4;
+            float back = newRoute ? steps[3] + 120.f : steps[b.flyBackups];
+            b.flyBackups = newRoute ? 0 : b.flyBackups + 1;
             float target = x - back;
             int i = (int)b.nodes.size() - 1;
             while (i > 0 && b.nodes[i].x > target) i--;
-            while (i > 0 && b.nodes[i].tried == 3) i--;
-            if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp && b.nodes[i].tried != 3) {
+            while (i > 0 && b.nodes[i].tried == 3 && !newRoute) i--;
+            if (i >= 0 && i < (int)b.nodes.size() && b.nodes[i].cp) {
                 while ((int)b.nodes.size() > i + 1) { b.nodes.pop_back(); this->removeCheckpoint(false); }
                 auto& n = b.nodes.back();
-                n.press = !(n.tried & 2);
-                n.tried |= n.press ? 2 : 1;
-                s_thought = "Keep hitting the same thing. Backing up " + std::to_string((int)(x - n.x)) + " units and flying it differently.";
-                return;
+                if (newRoute) {
+                    b.routeTries++;
+                    b.routeMode = (b.routeTries % 2) ? 1 : 2;
+                    b.routeY = n.y + (b.routeMode == 1 ? 75.f : -75.f);
+                    b.routeToX = x + 60.f;
+                    n.tried = 0;                         // a new route: every choice from here is open again
+                    bool up = b.routeMode == 1;
+                    n.press = m_player1 && m_player1->m_isUpsideDown ? !up : up;
+                    n.tried |= n.press ? 2 : 1;
+                    s_thought = std::string("Same spot again. Going back ") + std::to_string((int)(x - n.x)) + " units and trying the " +
+                                (b.routeMode == 1 ? "high" : "low") + " route.";
+                    return;
+                }
+                if (n.tried != 3) {
+                    n.press = !(n.tried & 2);
+                    n.tried |= n.press ? 2 : 1;
+                    s_thought = "Keep hitting the same thing. Backing up " + std::to_string((int)(x - n.x)) + " units and flying it differently.";
+                    return;
+                }
             }
         }
         if (b.sameCount >= 10 && !flying) {
