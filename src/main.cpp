@@ -1291,6 +1291,19 @@ public:
             });
         }
         }
+        addRow([] { return std::string("FPS bypass: ") + (Mod::get()->getSettingValue<bool>("fps-bypass") ? "ON" : "OFF"); }, [] {
+            bool on = !Mod::get()->getSettingValue<bool>("fps-bypass");
+            (void)Mod::get()->setSettingValue<bool>("fps-bypass", on);
+            if (on) { PlatformToolbox::toggleVerticalSync(false); applyFps(); }
+            else CCDirector::get()->setAnimationInterval(1.0 / 60.0);
+        });
+        addRow([] { return "FPS: " + std::to_string((int)Mod::get()->getSettingValue<int64_t>("fps")); }, [] {
+            static int64_t const steps[] = {60, 120, 144, 165, 240, 360, 480, 1000};
+            int64_t cur = Mod::get()->getSettingValue<int64_t>("fps"), next = steps[0];
+            for (auto v : steps) if (v > cur) { next = v; break; }
+            (void)Mod::get()->setSettingValue<int64_t>("fps", next);
+            applyFps();
+        });
         addRow([] { return std::string("Show his thoughts: ") + (s_showThoughts ? "ON" : "OFF"); }, [] { s_showThoughts = !s_showThoughts; });
         addRow([] { return std::string("Hitboxes: ") + (s_hitboxes ? "ON" : "OFF"); }, [] { s_hitboxes = !s_hitboxes; if (auto p = pl()) p->refreshDebugDraw(); });
         addRow([] { return std::string("Hitbox trail: ") + (s_trail ? "ON" : "OFF"); }, [] { s_trail = !s_trail; if (auto p = pl()) p->refreshDebugDraw(); });
