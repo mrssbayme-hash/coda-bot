@@ -1,0 +1,16 @@
+{
+	"geode": "6.0.0-beta.1",
+	"gd": {
+		"win": "2.2091"
+	},
+	"id": "coda.coda-bot",
+	"name": "Coda Bot",
+	"version": "v1.0.0",
+	"developer": "Coda",
+	"description": "Coda learns your levels by himself. His runs never count: no completions, no verifying, no saved progress.",
+	"resources": {
+		"sprites": [
+			"resources/*.png"
+		]
+	}
+}

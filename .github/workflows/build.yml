@@ -1,0 +1,25 @@
+name: Build Coda Bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  build:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        id: build
+        with:
+          sdk: v6.0.0-beta.1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coda-bot
+          path: ${{ steps.build.outputs.build-output }}
