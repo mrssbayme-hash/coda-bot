@@ -7,6 +7,7 @@
 #include <random>
 #include <deque>
 #include <functional>
+#include <chrono>
 #include <algorithm>
 
 using namespace geode::prelude;
@@ -59,6 +60,9 @@ static int s_mode = 1;
 static bool s_training = false;
 static int s_speedIdx = 1;
 static float const SPEEDS[] = {1.f, 4.f, 10.f, 20.f};
+static bool s_auto = false;        // auto train: turbo until he beats it
+static int s_modeBeforeAuto = 1;
+static float s_turbo = 20.f;       // adapts to how fast the PC can keep up
 static bool s_hitboxes = false;
 static bool s_trail = false;
 static int perGen() { return std::max(1, (int)Mod::get()->getSettingValue<int64_t>("attempts-per-generation")); }
@@ -488,6 +492,29 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!(s_enabled && (s_hitboxes || s_trail)) && m_debugDrawNode && !PlayLayer::shouldDrawDebugHitboxes()) m_debugDrawNode->clear();
     }
 
+    // Turbo: speed up while the PC keeps up (real frame under ~1/30 s), back off when it lags.
+    float turboSpeed() {
+        using clock = std::chrono::steady_clock;
+        static auto last = clock::now();
+        auto now = clock::now();
+        float real = std::chrono::duration<float>(now - last).count();
+        last = now;
+        if (real > 0.f && real < 0.5f) {
+            if (real < 1.f / 40.f) s_turbo = std::min(60.f, s_turbo * 1.02f);
+            else if (real > 1.f / 25.f) s_turbo = std::max(4.f, s_turbo * 0.9f);
+        }
+        return s_turbo;
+    }
+
+    void finishAuto() {
+        auto& b = this->brain();
+        s_auto = false;
+        s_mode = s_modeBeforeAuto;
+        s_speedIdx = 0;
+        b.skipUntil = -1;
+        say("Auto train done: beaten in " + std::to_string(b.attempts) + " attempts, " + std::to_string(b.gen) + " generations. (Doesn't count.)", 5.f);
+    }
+
     void levelComplete() {
         auto f = m_fields.self();
         if (!f->used) return PlayLayer::levelComplete();
@@ -499,7 +526,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.best = f->play;
             b.bestX = m_player1 ? m_player1->m_position.x : b.bestX;
             b.trial = b.best;
-            say("Coda beat it. (Doesn't count.)", 3.f);
+            if (s_auto) this->finishAuto();
+            else say("Coda beat it. (Doesn't count.)", 3.f);
         } else {
             say("Coda played this level, so it doesn't count. Reopen the level to play for real.", 4.f);
         }
@@ -534,6 +562,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             bool known = m_player1->m_position.x < b.bestX - 300.f && !m_player1->m_isDead;
             float speed = known ? mode().knownSpeed : mode().frontSpeed;
             if (s_training) speed = b.skipUntil >= 0 ? SPEEDS[3] : SPEEDS[s_speedIdx];
+            if (s_auto) speed = this->turboSpeed();
             CCDirector::get()->getScheduler()->setTimeScale(speed);
         }
     }
@@ -554,7 +583,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->face) f->face->setPosition({x0 + w * now, y0 + h / 2});
         f->pct->setString((std::to_string((int)(now * 100)) + "%").c_str());
         std::string info = "Best " + std::to_string((int)b.bestPct) + "%   Attempt " + std::to_string(b.attempts) +
-            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + "]";
+            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + "]" +
+            (s_auto ? "   AUTO TRAIN " + std::to_string((int)s_turbo) + "x" : "");
         f->info->setString(info.c_str());
 
         f->smugTime -= dt;
@@ -656,7 +686,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
         auto win = CCDirector::get()->getWinSize();
-        auto bg = CCLayerColor::create({0, 0, 0, 110}, 250.f, 118.f);
+        auto bg = CCLayerColor::create({0, 0, 0, 110}, 250.f, 136.f);
         bg->setPosition({win.width - 258.f, 6.f});
         this->addChild(bg, 49);
         auto menu = CCMenu::create();
@@ -675,6 +705,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
         this->addChild(m_fields->label, 50);
 
         float cx = win.width - 165.f;
+        addText(menu, {cx, 130.f}, menu_selector(CodaPauseLayer::onAuto), [] { return std::string("Auto train: ") + (s_auto ? "ON" : "OFF"); });
         addText(menu, {cx, 112.f}, menu_selector(CodaPauseLayer::onMode), [] { return std::string("Learning: ") + mode().name; });
         addText(menu, {cx, 94.f}, menu_selector(CodaPauseLayer::onTraining), [] { return std::string("Training: ") + (s_training ? "ON" : "OFF"); });
         addText(menu, {cx, 76.f}, menu_selector(CodaPauseLayer::onSpeed), [] { return "Speed: " + std::to_string((int)SPEEDS[s_speedIdx]) + "x"; });
@@ -702,9 +733,31 @@ class $modify(CodaPauseLayer, PauseLayer) {
     void onCoda(CCObject*) {
         if (s_enabled) {
             s_enabled = false;
+            if (s_auto) { s_auto = false; s_mode = s_modeBeforeAuto; }
             if (auto p = pl()) p->codaStop();
         } else this->turnOn();
         if (auto p = pl()) { p->redrawPaths(); p->refreshDebugDraw(); }
+        this->refresh();
+    }
+
+    // Auto train: Extreme learning + Training mode on turbo, nonstop until he beats the level.
+    void onAuto(CCObject*) {
+        s_auto = !s_auto;
+        if (s_auto) {
+            s_modeBeforeAuto = s_mode;
+            s_mode = 2;
+            s_training = true;
+            s_turbo = 20.f;
+            this->turnOn();
+            if (auto p = pl()) {
+                if (!p->m_isPlatformer) p->m_fields->needApply = true;
+                p->brain().beaten = false;
+                p->redrawPaths();
+            }
+        } else {
+            s_mode = s_modeBeforeAuto;
+            if (auto p = pl()) if (s_enabled && !p->m_isPlatformer) p->m_fields->needApply = true;
+        }
         this->refresh();
     }
 
