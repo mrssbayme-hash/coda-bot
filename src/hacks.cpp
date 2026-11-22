@@ -9,6 +9,7 @@
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/CCTransitionFade.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/GameObject.hpp>
 #include <chrono>
 #include <cstring>
 #include <algorithm>
@@ -136,6 +137,14 @@ namespace hacks {
         s_stats.startposCount = n;
     }
 
+    // ------------------------------------------------------------ layout mode
+    static bool s_needRestart = false;
+    void reopenLevel() { if (PlayLayer::get()) s_needRestart = true; }
+    static bool isDeco(GameObject* o) {
+        if (!o || o->m_isTrigger || o->m_objectID == 31) return false;
+        return o->m_objectType == GameObjectType::Decoration;
+    }
+
     // ------------------------------------------------------------ frame advance
     static int s_steps = 0;
     void frameStep() { if (V::frameAdvance) s_steps++; }
@@ -176,7 +185,6 @@ class $modify(HackPlayLayer, PlayLayer) {
 
     void addObject(GameObject* obj) {
         if (obj) {
-            if (V::layoutMode && obj->m_objectType == GameObjectType::Decoration && !obj->m_isTrigger) obj->m_isHide = true;
             if (V::layoutMode || V::noGlow) obj->m_hasNoGlow = true;
         }
         PlayLayer::addObject(obj);
@@ -292,6 +300,18 @@ class $modify(HackPlayLayer, PlayLayer) {
             else if (f->hidPlayer) { m_player1->setVisible(true); if (m_player2 && m_gameState.m_isDualMode) m_player2->setVisible(true); f->hidPlayer = false; }
         }
         if (m_attemptLabel) m_attemptLabel->setVisible(!V::hideAttempts);
+        if (s_needRestart) {
+            s_needRestart = false;
+            if (m_objects) for (auto o : CCArrayExt<GameObject*>(m_objects)) {
+                if (!isDeco(o)) continue;
+                if (V::layoutMode) { o->setVisible(false); if (o->m_glowSprite) o->m_glowSprite->setVisible(false); }
+            }
+            this->resetLevel();
+        }
+        if (V::layoutMode) {
+            if (m_background) m_background->setColor({40, 125, 255});
+            if (m_middleground) m_middleground->setVisible(false);
+        }
         if (V::hitboxes && m_debugDrawNode && !m_debugDrawNode->isVisible()) m_debugDrawNode->setVisible(true);
         // auto checkpoints
         if (V::autoCheckpoints && m_isPracticeMode && m_player1 && !m_player1->m_isDead && !m_isPaused) {
@@ -348,6 +368,21 @@ static int s_acCount = 0;
 static unsigned s_acFrame = ~0u;
 
 class $modify(HackBaseLayer, GJBaseGameLayer) {
+    // layout mode: every color goes back to GD's defaults
+    void updateColor(ccColor3B& color, float fadeTime, int colorID, bool blending, float opacity, ccHSVValue& copyHSV,
+                     int colorIDToCopy, bool copyOpacity, EffectGameObject* callerObject, int unk1, int unk2) {
+        if (V::layoutMode && PlayLayer::get() == static_cast<GJBaseGameLayer*>(this)) {
+            ccColor3B def{255, 255, 255};
+            if (colorID == 1000 || colorID == 1013 || colorID == 1014) def = {40, 125, 255};
+            else if (colorID == 1001 || colorID == 1009) def = {0, 102, 255};
+            color = def;
+            blending = false;
+            colorIDToCopy = 0;
+            opacity = 1.f;
+        }
+        GJBaseGameLayer::updateColor(color, fadeTime, colorID, blending, opacity, copyHSV, colorIDToCopy, copyOpacity, callerObject, unk1, unk2);
+    }
+
     void update(float dt) {
         if (V::frameAdvance && PlayLayer::get() == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) {
             if (s_steps <= 0) return;
@@ -373,6 +408,17 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
+        if (V::jumpHack && pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) {
+            // while you hold, the game thinks you're standing on something, so you can jump again
+            for (auto p : {m_player1, m_player2}) {
+                if (!p || p->m_isDead || (p == m_player2 && !m_gameState.m_isDualMode)) continue;
+                if (s_stats.held[p == m_player2 ? 1 : 0]) {
+                    p->m_isOnGround = true;
+                    p->m_touchingGround = true;
+                    p->m_landedSinceFlip = true;
+                }
+            }
+        }
         if (V::autoclicker && pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating() && !pl->m_player1->m_isDead) {
             unsigned fr = m_gameState.m_currentProgress;
             if (fr != s_acFrame) {
@@ -390,6 +436,19 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+    }
+};
+
+// ================================================================ layout mode
+// Decoration never gets switched on while layout mode is on, so only the gameplay objects are drawn.
+class $modify(LayoutObject, GameObject) {
+    void activateObject() {
+        if (V::layoutMode && PlayLayer::get() && isDeco(this)) {
+            if (m_glowSprite) m_glowSprite->setVisible(false);
+            this->setVisible(false);
+            return;
+        }
+        GameObject::activateObject();
     }
 };
 

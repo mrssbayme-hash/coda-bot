@@ -47,6 +47,7 @@ namespace V {
     // Player
     inline bool noclip = false, noclipP1 = true, noclipP2 = true, noclipFlash = false;
     inline Col noclipFlashColor{1.f, .15f, .2f, .35f};
+    inline bool jumpHack = false;
     inline bool noDeathEffect = false, respawnDelayOn = false, noRespawnBlink = false, hidePlayer = false;
     inline float respawnDelay = .5f;
     inline bool hitboxes = false, hitboxesOnDeath = false, hitboxTrail = false;
@@ -81,7 +82,7 @@ namespace V {
     inline bool frameAdvance = false;
     inline bool autoclicker = false, acP2 = false;
     inline int acHold = 2, acRelease = 2;
-    inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = true;
+    inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = false;
     // Menu
     inline Col accent{.965f, .635f, .71f, 1.f};
     inline Col bg{.11f, .086f, .133f, .94f};

@@ -152,6 +152,7 @@ namespace cfg {
         add(B("noclip-p2", "Player 2", "Player", &noclipP2, "", "noclip"));
         add(B("noclip-flash", "Red flash on death", "Player", &noclipFlash, "", "noclip"));
         add(C("noclip-flash-color", "Flash color", "Player", &noclipFlashColor, "noclip"));
+        add(cheat(B("jump-hack", "Jump hack", "Player", &jumpHack, "Jump in mid-air. Hold to keep jumping.")));
         add(B("no-death-effect", "No death effect", "Player", &noDeathEffect));
         add(B("respawn-delay", "Respawn delay", "Player", &respawnDelayOn, "Change how long you wait after dying. 0 is instant."));
         add(F("respawn-delay-s", "Seconds", "Player", &respawnDelay, 0.f, 3.f, "%.2f s", "respawn-delay"));
@@ -171,7 +172,8 @@ namespace cfg {
         add(B("auto-checkpoints", "Auto checkpoints", "Player", &autoCheckpoints, "In practice mode, places checkpoints for you while you're on the ground."));
         add(F("auto-cp-every", "Every", "Player", &autoCpEvery, .5f, 10.f, "%.1f s", "auto-checkpoints"));
         // Level
-        add(cheat(B("layout-mode", "Layout mode", "Level", &layoutMode, "Hides decoration and glow so only the gameplay is left. Smoother on big levels. Reopen the level to apply.")));
+        add(on(cheat(B("layout-mode", "Layout mode", "Level", &layoutMode, "Shows just the layout: decoration is removed and colors go back to default. Restarts the level when you change it.")),
+            [] { hacks::reopenLevel(); }));
         add(B("no-glow", "No glow", "Level", &noGlow, "Reopen the level to apply."));
         add(B("accurate-percent", "Accurate percent", "Level", &accuratePercent));
         add(I("percent-decimals", "Decimals", "Level", &percentDecimals, 1, 4, "accurate-percent"));
@@ -241,5 +243,7 @@ namespace cfg {
         add(A("bot-play", "Start or stop playback", "Keys", 0, [] {
             if (replay::state() == replay::State::Playing) replay::stop(); else replay::play(); }));
         load();
+        // Coda never starts playing by himself: his pathfinder is off every time the game opens
+        pathfinder = false;
     }
 }

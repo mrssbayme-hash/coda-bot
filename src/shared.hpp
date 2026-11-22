@@ -47,6 +47,7 @@ namespace hacks {
     void refreshHitboxes();
     void startposStep(int dir);
     void frameStep();
+    void reopenLevel();
     int currentTps();
     // live numbers for the labels
     struct Stats {
