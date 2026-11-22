@@ -21,12 +21,34 @@ struct Brain {
     int attempts = 0;
     int stuck = 0;               // attempts since his last new best
     bool beaten = false;
+    bool confirm = false;        // replay the best run once to set a checkpoint before experimenting
+    float cpX = 0.f;             // where his current checkpoint is (0 = none)
+    float noCpBefore = 0.f;      // after giving up on a checkpoint, don't set another until he gets past here
+    int sweep = 0;               // which nudge to try next on the jump before the spike
 };
+
+// ---------------------------------------------------------------- learning modes
+struct Mode {
+    char const* name;
+    bool checkpoints;     // practice from just before the hard part
+    float cpMargin;       // how far before his best the checkpoint goes
+    int cpPatience;       // attempts stuck before he gives up on the checkpoint
+    float knownSpeed;     // game speed through parts he already knows
+    float frontSpeed;     // game speed near the hard part
+    float slip;           // chance of fumbling a known part
+    float slipBeaten;
+};
+static Mode const MODES[] = {
+    {"Slow",    false, 0.f,   0,  1.f, 1.f, 0.14f, 0.30f},
+    {"High",    true,  210.f, 35, 3.f, 1.f, 0.07f, 0.20f},
+    {"Extreme", true,  120.f, 25, 5.f, 2.f, 0.03f, 0.10f},
+};
+static int s_mode = 1;
+static Mode const& mode() { return MODES[s_mode]; }
 
 static std::unordered_map<std::string, Brain> s_brains;
 static bool s_enabled = false;   // Coda is playing
 static bool s_fromBot = false;   // the current button press came from Coda
-static bool s_fast = true;       // fast-forward through parts he already knows
 static std::mt19937 s_rng{std::random_device{}()};
 
 static float rnd(float a, float b) { return std::uniform_real_distribution<float>(a, b)(s_rng); }
@@ -49,28 +71,45 @@ static void tidy(std::vector<Hold>& v) {
     v = std::move(out);
 }
 
-// Try something new near the place he keeps dying. The window grows the longer he is stuck,
-// so he eventually rethinks earlier jumps too.
-static std::vector<Hold> mutate(std::vector<Hold> const& best, float frontier, int stuck) {
+// Try something new near the place he keeps dying.
+//  - most of the time: nudge the last jump before the spike, sweeping earlier/later in growing steps
+//  - sometimes: add a jump right before the spike
+//  - otherwise: shake up everything in a window that grows the longer he's stuck
+// Nothing before `floor` (his checkpoint) can change, since he'd never replay it.
+static std::vector<Hold> mutate(std::vector<Hold> const& best, float frontier, int stuck, int& sweep, float floor) {
+    static float const nudges[] = {2, -2, 4, -4, 6, -6, 9, -9, 13, -13, 18, -18};
+    std::vector<Hold> out;
+    for (auto h : best) if (h.start <= frontier + 30.f) out.push_back(h);   // forget what was never reached
     float window = 45.f + std::min(stuck, 40) * 7.f;
     if (stuck > 25 && chance(0.25f)) window *= 2.f;
-    float lo = std::max(0.f, frontier - window);
-    std::vector<Hold> out;
-    for (auto h : best) {
-        if (h.start > frontier + 30.f) continue;               // never reached: forget it
-        if (h.start >= lo) {
-            if (chance(0.12f)) continue;                       // drop this jump
-            if (chance(0.45f)) { float d = rnd(-9.f, 9.f); h.start += d; h.end += d; }
-            if (chance(0.30f)) h.end += rnd(-12.f, 12.f);      // hold longer or shorter
-        }
-        out.push_back(h);
-    }
-    int adds = chance(0.6f) ? 1 : (chance(0.5f) ? 2 : 0);
-    for (int i = 0; i < adds; i++) {
-        float s = rnd(lo, frontier + 15.f);
-        float len = chance(0.6f) ? rnd(1.f, 6.f) : rnd(10.f, 110.f);   // a tap, or a hold
+    float lo = std::max(floor + 4.f, frontier - window);
+
+    int last = -1;
+    for (int i = 0; i < (int)out.size(); i++) if (out[i].start >= lo && out[i].start < frontier) last = i;
+    float r = rnd(0.f, 1.f);
+    if (last >= 0 && r < 0.5f) {
+        float d = nudges[sweep % 12] * (1.f + (sweep / 12) * 0.5f);
+        sweep++;
+        out[last].start += d;
+        if (chance(0.5f)) out[last].end += d; else out[last].end += rnd(-8.f, 8.f);
+    } else if (r < 0.75f) {
+        float s = std::max(lo, frontier - rnd(4.f, 45.f));
+        float len = chance(0.65f) ? rnd(1.f, 6.f) : rnd(10.f, 90.f);
         out.push_back({s, s + len});
+    } else {
+        std::vector<Hold> keep;
+        for (auto h : out) {
+            if (h.start >= lo) {
+                if (chance(0.12f)) continue;
+                if (chance(0.45f)) { float d = rnd(-9.f, 9.f); h.start += d; h.end += d; }
+                if (chance(0.30f)) h.end += rnd(-12.f, 12.f);
+            }
+            keep.push_back(h);
+        }
+        out = keep;
+        if (chance(0.6f)) { float s = rnd(lo, frontier + 15.f); out.push_back({s, s + (chance(0.6f) ? rnd(1.f, 6.f) : rnd(10.f, 110.f))}); }
     }
+    for (auto& h : out) if (h.start < floor + 4.f && h.end > floor + 4.f && h.start >= lo - 20.f) h.start = floor + 4.f;
     tidy(out);
     return out;
 }
@@ -91,6 +130,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         float msgTime = 0.f;
         bool used = false;        // Coda played at some point while this level was open
         bool needReset = false;
+        bool needApply = false;
         bool sloppy = false;      // this attempt had a deliberate slip
         bool held = false;
         size_t idx = 0;
@@ -150,7 +190,17 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->used = true;
         m_isTestMode = true;
         if (f->hud) f->hud->setVisible(true);
-        if (m_isPlatformer) say("Coda only plays classic levels.", 3.f);
+        if (m_isPlatformer) { say("Coda only plays classic levels.", 3.f); return; }
+        f->needApply = true;      // switch practice mode on the next frame, not in the middle of setup
+    }
+
+    // Slow plays every attempt from the start; High and Extreme practice from checkpoints.
+    void applyMode() {
+        auto& b = this->brain();
+        this->removeAllCheckpoints();
+        b.cpX = 0.f;
+        b.confirm = mode().checkpoints && b.bestX > 0.f;
+        if (m_isPracticeMode != mode().checkpoints) this->togglePracticeMode(mode().checkpoints);
     }
 
     void codaStop() {
@@ -159,6 +209,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->hud) f->hud->setVisible(false);
         this->restoreIcon();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
+        if (!m_isPlatformer) {
+            this->removeAllCheckpoints();
+            this->brain().cpX = 0.f;
+            if (m_isPracticeMode) this->togglePracticeMode(false);
+        }
     }
 
     void release() {
@@ -195,12 +250,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!s_enabled || m_isPlatformer) return;
         auto& b = this->brain();
         b.attempts++;
-        f->play = b.trial.empty() && !b.best.empty() ? b.best : b.trial;
+        f->play = (b.confirm || b.trial.empty()) ? b.best : b.trial;
         f->sloppy = false;
         // He's good, not perfect: sometimes he fumbles a jump he already knows.
-        if (b.bestX > 300.f && !b.best.empty() && chance(b.beaten ? 0.25f : 0.10f)) {
+        if (!b.confirm && b.bestX > 300.f && !b.best.empty() && chance(b.beaten ? mode().slipBeaten : mode().slip)) {
             std::vector<size_t> known;
-            for (size_t i = 0; i < f->play.size(); i++) if (f->play[i].start < b.bestX - 90.f) known.push_back(i);
+            for (size_t i = 0; i < f->play.size(); i++) if (f->play[i].start < b.bestX - 90.f && f->play[i].start > b.cpX + 10.f) known.push_back(i);
             if (!known.empty()) {
                 auto& h = f->play[known[(size_t)rnd(0.f, (float)known.size() - 0.001f)]];
                 float d = (chance(0.5f) ? 1.f : -1.f) * rnd(4.f, 10.f);
@@ -226,20 +281,48 @@ class $modify(CodaPlayLayer, PlayLayer) {
             b.trial = b.best;     // the slip wasn't a real lesson; try his real plan again
             return;
         }
+        if (b.confirm) {          // the replay that sets his checkpoint; not an experiment
+            b.confirm = false;
+            if (x > b.bestX + 0.5f) { b.bestX = x; b.bestPct = pct; }
+            b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX);
+            return;
+        }
         if (x > b.bestX + 0.5f) {
-            b.best = b.trial.empty() ? f->play : b.trial;
+            b.best = f->play;
             b.bestX = x;
             b.bestPct = pct;
             if (b.stuck > 6) say("Finally.");
             else if (b.attempts > 1) say("New best: " + std::to_string((int)pct) + "%");
             b.stuck = 0;
+            b.sweep = 0;
             f->smugTime = 1.5f;
+            if (mode().checkpoints && b.bestX - mode().cpMargin > b.cpX + 60.f && b.bestX > b.noCpBefore) b.confirm = true;
         } else {
             b.stuck++;
             if (b.stuck == 15) say("This spike again.");
             if (b.stuck == 40) say("I hate this part.");
+            // Stuck too long from this checkpoint: maybe the mistake is earlier. Go back to full runs.
+            if (mode().checkpoints && b.cpX > 0.f && b.stuck % mode().cpPatience == 0) {
+                this->removeAllCheckpoints();
+                b.cpX = 0.f;
+                b.noCpBefore = b.bestX + 30.f;
+                say("Rethinking the whole thing.");
+            }
         }
-        b.trial = mutate(b.best, b.bestX, b.stuck);
+        b.trial = mutate(b.best, b.bestX, b.stuck, b.sweep, b.cpX);
+    }
+
+    // During the confirm replay, drop a checkpoint a bit before his best.
+    void maybeCheckpoint() {
+        auto& b = this->brain();
+        if (!b.confirm || !mode().checkpoints || !m_isPracticeMode || !m_player1 || m_player1->m_isDead) return;
+        float x = m_player1->m_position.x;
+        float target = b.bestX - mode().cpMargin;
+        if (x >= target && target > b.cpX + 60.f) {
+            this->removeAllCheckpoints();
+            this->markCheckpoint();
+            b.cpX = x;
+        }
     }
 
     void levelComplete() {
@@ -274,14 +357,16 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
         auto f = m_fields.self();
+        if (f->needApply) { f->needApply = false; if (s_enabled) this->applyMode(); f->needReset = true; }
         if (f->needReset) { f->needReset = false; this->resetLevel(); }
         if (!s_enabled) return;
         this->updateIcon();
         this->updateHud(dt);
         if (m_player1 && !m_isPlatformer) {
+            this->maybeCheckpoint();
             auto& b = this->brain();
-            bool known = m_player1->m_position.x < b.bestX - 450.f && !m_player1->m_isDead;
-            CCDirector::get()->getScheduler()->setTimeScale(s_fast && known ? 3.f : 1.f);
+            bool known = m_player1->m_position.x < b.bestX - 300.f && !m_player1->m_isDead;
+            CCDirector::get()->getScheduler()->setTimeScale(known ? mode().knownSpeed : mode().frontSpeed);
         }
     }
 
@@ -301,7 +386,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->face) f->face->setPosition({x0 + w * now, y0 + h / 2});
         f->pct->setString((std::to_string((int)(now * 100)) + "%").c_str());
         std::string info = "Best " + std::to_string((int)b.bestPct) + "%   Attempt " + std::to_string(b.attempts) +
-            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...");
+            (b.beaten ? "   Beaten (doesn't count)" : "   Learning...") + "   [" + mode().name + "]";
         f->info->setString(info.c_str());
 
         f->smugTime -= dt;
@@ -318,7 +403,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     // ------------------------------------------------ his icons (only while he plays)
-    int modeOf(PlayerObject* p) {
+    int iconOf(PlayerObject* p) {
         if (p->m_isShip) return 1;
         if (p->m_isBall) return 2;
         if (p->m_isBird) return 3;
@@ -333,7 +418,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         auto p = m_player1;
         if (!p || !p->m_mainLayer) return;
-        int mode = this->modeOf(p);
+        int mode = this->iconOf(p);
         if (mode != f->iconMode || !f->icon) {
             if (f->icon) f->icon->removeFromParent();
             char const* names[] = {"coda-cube.png"_spr, "coda-ship.png"_spr, "coda-ball.png"_spr, "coda-ufo.png"_spr,
@@ -346,7 +431,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (p->m_robotSprite) p->m_robotSprite->setVisible(false);
         if (p->m_spiderSprite) p->m_spiderSprite->setVisible(false);
         if (f->icon) {
-            float base = (mode == 0 || mode == 2) ? 1.0f : 0.96f;   // sprites are 128px UHD = 32 units
+            float base = (mode == 0 || mode == 2) ? 0.8f : 0.77f;    // sprites are 128px UHD = 32 units
             f->icon->setPosition(p->m_mainLayer->getPosition());
             f->icon->setScaleX(base * p->m_vehicleSize * (p->m_mainLayer->getScaleX() < 0 ? -1.f : 1.f));
             f->icon->setScaleY(base * p->m_vehicleSize * (p->m_mainLayer->getScaleY() < 0 ? -1.f : 1.f));
@@ -411,7 +496,7 @@ class $modify(CodaPauseLayer, PauseLayer) {
         auto spd = CCLabelBMFont::create("", "bigFont.fnt");
         spd->setScale(0.3f);
         auto sbtn = CCMenuItemSpriteExtra::create(spd, this, menu_selector(CodaPauseLayer::onSpeed));
-        sbtn->setPosition({win.width - 120.f, 22.f});
+        sbtn->setPosition({win.width - 140.f, 22.f});
         menu->addChild(sbtn);
         m_fields->speed = spd;
         this->refresh();
@@ -419,20 +504,23 @@ class $modify(CodaPauseLayer, PauseLayer) {
 
     void refresh() {
         if (m_fields->label) m_fields->label->setString(s_enabled ? "Coda: ON" : "Coda: OFF");
-        if (m_fields->speed) m_fields->speed->setString(s_fast ? "Fast training" : "Normal speed");
+        if (m_fields->speed) m_fields->speed->setString((std::string("Learning: ") + mode().name).c_str());
     }
 
     void onCoda(CCObject*) {
         s_enabled = !s_enabled;
         if (auto pl = static_cast<CodaPlayLayer*>(PlayLayer::get())) {
-            if (s_enabled) { pl->codaStart(); pl->m_fields->needReset = true; }
+            if (s_enabled) pl->codaStart();
             else pl->codaStop();
         }
         this->refresh();
     }
 
     void onSpeed(CCObject*) {
-        s_fast = !s_fast;
+        s_mode = (s_mode + 1) % 3;
+        if (auto pl = static_cast<CodaPlayLayer*>(PlayLayer::get())) {
+            if (s_enabled && !pl->m_isPlatformer) pl->m_fields->needApply = true;
+        }
         this->refresh();
     }
 };
