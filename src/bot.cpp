@@ -713,7 +713,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
             float pct = this->getCurrentPercent();
             auto& b = this->brain();
             if (pct > b.bestPct) b.bestPct = pct;
-            say("Died at " + std::to_string((int)pct) + "%. Something moved that I couldn't see coming.", 2.5f);
+            auto f2 = m_fields.self();
+            int H = this->lookHorizon();
+            int okNow = f2->look.empty() ? 0 : this->lookCheck(f2->look);
+            say("Died at " + std::to_string((int)pct) + "%. " + (okNow >= H ? std::string("My look-ahead said I'd make it, so something didn't go like I predicted.")
+                                                                             : std::string("I saw it coming but couldn't find a way out.")), 3.f);
             log::info("[look] DIED x={:.1f} y={:.1f} yv={:.2f} mode={} mini={} upside={} held={} by obj id={} type={}", player->m_position.x, player->m_position.y,
                       player->m_yVelocity, modeOf(player), player->m_vehicleSize < 0.9f, player->m_isUpsideDown, m_fields->held,
                       object ? object->m_objectID : -1, object ? (int)object->m_objectType : -1);
@@ -1210,7 +1214,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void lookStep() {
         auto f = m_fields.self();
         // compare last step's one-step prediction with what really happened
-        if (f->predValid && f->desyncLogs < 60 && f->lookTick > 30) {
+        if (V::codaDebugLog && f->predValid && f->desyncLogs < 60 && f->lookTick > 30) {
             double dy = m_player1->m_position.y - f->predY, dx = m_player1->m_position.x - f->predX;
             if (std::abs(dy) > 0.6 || std::abs(dx) > 3.0 || f->predMode != modeOf(m_player1)) {
                 f->desyncLogs++;
@@ -1250,9 +1254,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
                     while ((int)f->look.size() < H) f->look.push_back(f->look.back());
                 }
                 s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
-                if (depth < H) log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
+                if (depth < H && V::codaDebugLog) log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
                           modeOf(m_player1), m_player1->m_vehicleSize < 0.9f, m_player1->m_isUpsideDown, f->held, ok, H, depth);
-                if (depth < H && f->probeLogs < 12) { f->probeLogs++; this->lookProbes(); }
+                if (depth < H && V::codaDebugLog && f->probeLogs < 12) { f->probeLogs++; this->lookProbes(); }
             } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
             if (V::showPath && f->live) {
                 f->lookPath.clear();
@@ -1264,7 +1268,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->lookTick++;
         bool want = !f->look.empty() && f->look.front();
         // one-step prediction for the self-check above
-        if (auto g = overBudget() ? nullptr : this->acquireGhost()) {
+        if (auto g = (overBudget() || !V::codaDebugLog) ? nullptr : this->acquireGhost()) {
             copyState(m_player1, g);
             std::unordered_set<GameObject*> act;
             SimGuard guard(this);

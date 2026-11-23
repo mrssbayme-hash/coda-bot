@@ -242,6 +242,7 @@ namespace cfg {
             [] { bot::setEnabled(V::pathfinder); }));
         add(on(B("coda-lookahead", "Follow the trajectory", "Coda Bot", &codaLookahead, "Coda looks ahead with his trajectory all the time and takes whatever way survives. Off = his old learning pathfinder.", "pathfinder"),
             [] { if (bot::enabled()) { bot::setEnabled(false); bot::setEnabled(true); } }));
+        add(B("coda-debug-log", "Detailed log", "Coda Bot", &codaDebugLog, "Writes what his look-ahead predicts to the Geode log, for finding bugs. Slower.", "coda-lookahead"));
         add(B("show-thoughts", "Show his thoughts", "Coda Bot", &showThoughts, "", "pathfinder"));
         add(B("show-path", "Show his path", "Coda Bot", &showPath, "", "pathfinder"));
         add(B("analyze-button", "Analyze button on levels", "Coda Bot", &analyzeButton, "A Coda button on level pages that works out a route, then plays it."));

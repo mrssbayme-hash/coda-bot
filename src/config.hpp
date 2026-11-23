@@ -94,6 +94,7 @@ namespace V {
     inline int acHold = 2, acRelease = 2;
     inline bool fwcOverlay = true;
     inline bool codaLookahead = true;
+    inline bool codaDebugLog = true;
     inline float fwcScale = 1.f;
     inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = false;
     // Level Roulette
