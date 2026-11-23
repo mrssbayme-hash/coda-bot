@@ -26,7 +26,7 @@ namespace {
     ImFont* s_body = nullptr;
     ImFont* s_title = nullptr;
 
-    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Roulette", "Keybinds", "Coda"};
+    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Frames", "Roulette", "Keybinds", "Coda"};
 
     ImU32 col(Col const& c, float alphaMul = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, c.a * alphaMul)); }
     ImVec4 v4(Col const& c, float a = -1.f) { return ImVec4(c.r, c.g, c.b, a < 0.f ? c.a : a); }
@@ -254,6 +254,119 @@ namespace {
         ImGui::Separator();
     }
 
+    // ------------------------------------------------------------ frame windows
+    // how hard a click is, from how long its window lasts (so it means the same at any TPS)
+    struct Grade { char const* name; ImVec4 color; };
+    Grade grade(fwin::Result const& r) {
+        double ms = r.window() * 1000.0 / std::max(1, r.tps);
+        if (r.window() <= 1) return {"Frame perfect", ImVec4(1.f, .3f, .35f, 1.f)};
+        if (ms <= 9.0) return {"Very hard", ImVec4(1.f, .5f, .3f, 1.f)};
+        if (ms <= 13.0) return {"Hard", ImVec4(1.f, .72f, .3f, 1.f)};
+        if (ms <= 22.0) return {"Tight", ImVec4(1.f, .9f, .4f, 1.f)};
+        if (ms <= 40.0) return {"Okay", ImVec4(.6f, .9f, .5f, 1.f)};
+        return {"Easy", ImVec4(.45f, .85f, 1.f, 1.f)};
+    }
+    std::string windowText(fwin::Result const& r) {
+        if (r.died) return "you died right after";
+        if (r.unknown) return "couldn't tell";
+        char b[96];
+        bool more = r.capEarly || r.capLate;
+        std::snprintf(b, sizeof b, "%s%d frame%s (%.1f ms)", more ? "at least " : "", r.window(), r.window() == 1 ? "" : "s", r.window() * 1000.0 / std::max(1, r.tps));
+        return b;
+    }
+
+    void framesWindow() {
+        auto& res = fwin::results();
+        int n = 0, fp = 0, unk = 0, died = 0;
+        fwin::Result const* hardest = nullptr;
+        for (auto& r : res) {
+            if (r.died) { died++; continue; }
+            if (r.unknown) { unk++; continue; }
+            n++; if (r.window() <= 1) fp++;
+            if (!hardest || r.window() < hardest->window()) hardest = &r;
+        }
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.f);
+        if (!V::fwOn) ImGui::TextDisabled("Turn it on, then play. Each click gets a window: how many frames you could have clicked and still lived.");
+        else if (res.empty()) ImGui::TextDisabled("Play, or play a macro from Coda Bot. Clicks show up here a moment after you make them.");
+        ImGui::PopTextWrapPos();
+        if (n) {
+            ImGui::Text("%d clicks counted, %d frame perfect", n, fp);
+            if (hardest) {
+                auto g = grade(*hardest);
+                ImGui::Text("Hardest:"); ImGui::SameLine();
+                ImGui::TextColored(g.color, "%s at %.1f%%", windowText(*hardest).c_str(), hardest->pct);
+            }
+        }
+        if (unk) ImGui::TextDisabled("%d couldn't be checked (moving parts or triggers)", unk);
+        if (fwin::waiting()) ImGui::TextDisabled("Working on %d more...", fwin::waiting());
+        float w = (ImGui::GetContentRegionAvail().x - 4.f) / 2.f;
+        if (ImGui::Button("Clear list", ImVec2(w, 0))) fwin::clear();
+        ImGui::SameLine(0, 4);
+        if (ImGui::Button("Count my macro", ImVec2(w, 0))) {
+            if (replay::inputCount() == 0) menu::notify("Load or record a macro in Coda Bot first");
+            else { if (!V::fwOn) { V::fwOn = true; if (auto f = cfg::find("fw")) cfg::changed(*f); } fwin::clear(); replay::play(); }
+        }
+        if (res.empty()) return;
+        ImGui::BeginChild("fwlist", ImVec2(0, 190.f * V::menuScale), ImGuiChildFlags_Borders);
+        for (auto it = res.rbegin(); it != res.rend(); ++it) {
+            auto& r = *it;
+            ImGui::TextDisabled("%5.1f%%", r.pct); ImGui::SameLine();
+            ImGui::TextUnformatted(r.down ? "click  " : "release"); ImGui::SameLine();
+            if (r.died || r.unknown) { ImGui::TextDisabled("%s", windowText(r).c_str()); continue; }
+            auto g = grade(r);
+            ImGui::TextColored(g.color, "%d%s f", r.window(), (r.capEarly || r.capLate) ? "+" : "");
+            ImGui::SameLine();
+            ImGui::TextColored(g.color, "%s", g.name);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n%d%s frame%s earlier and %d%s later would still work.\nPhysics frame %u.",
+                    windowText(r).c_str(), r.early, r.capEarly ? "+" : "", r.early == 1 ? "" : "s", r.late, r.capLate ? "+" : "", r.frame);
+        }
+        ImGui::EndChild();
+    }
+
+    // the last click's window at the bottom of the screen
+    void drawFrameWidget() {
+        if (!V::fwOn || !V::fwScreen || !PlayLayer::get()) return;
+        auto& res = fwin::results();
+        if (res.empty()) return;
+        auto& r = res.back();
+        double age = hacks::now() - r.shownAt;
+        float a = (float)std::clamp(4.0 - age, 0.0, 1.0);
+        if (a <= 0.f) return;
+        auto& io = ImGui::GetIO();
+        auto dl = ImGui::GetBackgroundDrawList();
+        ImFont* font = s_body ? s_body : ImGui::GetFont();
+        float size = 17.f * V::lblScale;
+        auto g = grade(r);
+        std::string top = (r.down ? "Click: " : "Release: ") + windowText(r);
+        std::string word = (r.died || r.unknown) ? "" : g.name;
+        float cell = 11.f * V::lblScale, gap = 2.f;
+        int K = r.K, cells = 2 * K + 1;
+        float barW = cells * (cell + gap) - gap;
+        ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.f, top.c_str());
+        float boxW = std::max(barW, ts.x) + 24.f, boxH = size * 2.4f + cell + 14.f;
+        float y0 = io.DisplaySize.y - boxH - (V::lblInputs ? 50.f * V::lblScale : 12.f);
+        ImVec2 p0(io.DisplaySize.x / 2 - boxW / 2, y0), p1(p0.x + boxW, y0 + boxH);
+        dl->AddRectFilled(p0, p1, IM_COL32(20, 16, 24, (int)(190 * a * V::lblOpacity)), 10.f);
+        ImU32 gc = ImGui::ColorConvertFloat4ToU32(ImVec4(g.color.x, g.color.y, g.color.z, a));
+        dl->AddRect(p0, p1, (r.died || r.unknown) ? IM_COL32(255, 255, 255, (int)(90 * a)) : gc, 10.f, 0, 2.f);
+        dl->AddText(font, size, ImVec2(io.DisplaySize.x / 2 - ts.x / 2, p0.y + 6.f), IM_COL32(243, 236, 217, (int)(255 * a)), top.c_str());
+        if (!word.empty()) {
+            ImVec2 ws = font->CalcTextSizeA(size * .9f, FLT_MAX, 0.f, word.c_str());
+            dl->AddText(font, size * .9f, ImVec2(io.DisplaySize.x / 2 - ws.x / 2, p0.y + 6.f + size * 1.15f), gc, word.c_str());
+        }
+        // the bar: each square is a frame; filled ones would still work; the outlined one is when you clicked
+        float bx = io.DisplaySize.x / 2 - barW / 2, by = p1.y - cell - 8.f;
+        for (int i = 0; i < cells; i++) {
+            int k = i - K;
+            bool ok = !r.died && !r.unknown && k >= -r.early && k <= r.late;
+            ImVec2 c0(bx + i * (cell + gap), by), c1(c0.x + cell, c0.y + cell);
+            dl->AddRectFilled(c0, c1, ok ? gc : IM_COL32(255, 255, 255, (int)(40 * a)), 2.f);
+            if (k == 0) dl->AddRect(ImVec2(c0.x - 2, c0.y - 2), ImVec2(c1.x + 2, c1.y + 2), IM_COL32(255, 255, 255, (int)(230 * a)), 3.f, 0, 1.5f);
+        }
+    }
+
     void codaStatus() {
         auto cheats = cfg::cheatsInUse();
         if (bot::enabled()) cheats.push_back("Coda's pathfinder");
@@ -305,7 +418,7 @@ namespace {
         bool searching = s_search[0] != 0;
         if (!searching) ImGui::SeparatorText("Menu and actions");
         for (auto& f : cfg::all()) if (f.type == cfg::T::Action && matches(f)) keyButton(f);
-        for (char const* w : {"Player", "Level", "Bypass", "Coda Bot", "Labels"}) {
+        for (char const* w : {"Player", "Level", "Bypass", "Coda Bot", "Frames", "Labels"}) {
             bool header = false;
             for (auto& f : cfg::all()) {
                 if (f.win != w || f.type != cfg::T::Bool || !matches(f)) continue;
@@ -340,7 +453,7 @@ namespace {
             if (x + winW > io.DisplaySize.x - 8.f && i > 0) { x = 16.f; y += 340.f * scale; }
             ImVec2 def(x, y);
             x += winW + 12.f;
-            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0 && std::strcmp(name, "Roulette") != 0) continue;
+            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0 && std::strcmp(name, "Roulette") != 0 && std::strcmp(name, "Frames") != 0) continue;
             ImGui::SetNextWindowPos(def, s_resetLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSizeConstraints(ImVec2(winW, 0.f), ImVec2(winW, io.DisplaySize.y - 20.f));
             bool kbWin = std::strcmp(name, "Keybinds") == 0;
@@ -358,6 +471,7 @@ namespace {
                 if (std::strcmp(name, "Keybinds") == 0) keybindsWindow();
                 else if (std::strcmp(name, "Roulette") == 0) roulette::drawWindow();
                 else drawFields(name);
+                if (std::strcmp(name, "Frames") == 0 && !s_search[0]) framesWindow();
                 if (std::strcmp(name, "Bypass") == 0 && !hacks::tpsSupported())
                     ImGui::TextColored(ImVec4(1.f, .6f, .4f, 1.f), "TPS bypass needs Steam GD 2.2091.");
                 if (std::strcmp(name, "Coda") == 0 && !s_search[0]) codaExtras();
@@ -476,6 +590,7 @@ namespace {
         float speed = V::menuAnim ? io.DeltaTime * 8.f : 1.f;
         s_anim = s_anim < target ? std::min(target, s_anim + speed) : std::max(target, s_anim - speed);
         drawLabels();
+        drawFrameWidget();
         if (s_anim > .001f) {
             if (V::dimGame) ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 8, 20, (int)(110 * s_anim)));
             ImGui::GetStyle().Alpha = s_anim;

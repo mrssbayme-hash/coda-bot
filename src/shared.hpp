@@ -20,6 +20,25 @@ namespace bot {
     bool& fromBot();          // true while a button press comes from a bot, not your hands
 }
 
+// Frame window counter (bot.cpp): how many frames each click could have been and still lived
+namespace fwin {
+    struct Result {
+        unsigned frame = 0;
+        bool down = true;
+        int early = 0, late = 0;          // frames earlier / later that still work
+        bool capEarly = false, capLate = false;   // hit the checking limit (could be even more)
+        bool unknown = false;             // the replay didn't match what happened (moving parts, triggers)
+        bool died = false;                // you died right after this click
+        float pct = 0.f;
+        int tps = 240, K = 8;
+        double shownAt = 0.0;
+        int window() const { return early + late + 1; }
+    };
+    std::deque<Result>& results();
+    int waiting();
+    void clear();
+}
+
 // Replay bot (replay.cpp)
 namespace replay {
     enum class State { Off, Recording, Playing };

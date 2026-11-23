@@ -241,6 +241,11 @@ namespace cfg {
         add(B("show-thoughts", "Show his thoughts", "Coda Bot", &showThoughts, "", "pathfinder"));
         add(B("show-path", "Show his path", "Coda Bot", &showPath, "", "pathfinder"));
         add(B("analyze-button", "Analyze button on levels", "Coda Bot", &analyzeButton, "A Coda button on level pages that works out a route, then plays it."));
+        // Frames
+        add(B("fw", "Frame window counter", "Frames", &fwOn, "After each click, works out how many frames earlier or later you could have clicked and still lived. Works while you play and while a macro plays."));
+        add(B("fw-releases", "Count releases too", "Frames", &fwReleases, "Letting go matters for ship, wave, UFO and holds.", "fw"));
+        add(B("fw-screen", "Show on screen", "Frames", &fwScreen, "The last click's window at the bottom of the screen.", "fw"));
+        add(I("fw-max", "Frames to check each way", "Frames", &fwMax, 3, 15, "fw"));
         // Level Roulette (drawn by its own window)
         add(I("rl-list", "List", "Roulette", &rlList, 0, 4));
         add(I("rl-from", "From", "Roulette", &rlFrom, 1, 5000));

@@ -93,6 +93,9 @@ namespace V {
     inline bool autoclicker = false, acP2 = false;
     inline int acHold = 2, acRelease = 2;
     inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = false;
+    // Frames (frame window counter)
+    inline bool fwOn = false, fwReleases = true, fwScreen = true;
+    inline int fwMax = 8;
     // Level Roulette
     inline int rlList = 0, rlFrom = 1, rlTo = 150, rlMaxFps = 240;
     inline bool rlLimitFps = false, rlSkipBeaten = true, rlSkip2P = false, rlAutoTps = false, rlRoulette = false;

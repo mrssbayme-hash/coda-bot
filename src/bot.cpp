@@ -108,6 +108,33 @@ static bool s_ghostDead = false;
 static bool s_ghostDone = false;
 static PlayerObject* s_simGhost = nullptr;
 static std::unordered_set<GameObject*>* s_simActivated = nullptr;
+
+// ---------------------------------------------------------------- frame window counter (state)
+// Every physics step we keep a copy of where you were. When you click, the copies from just before
+// are saved with the click. A moment later, once we know what you did next, an invisible copy of
+// you replays that bit with the click moved earlier and later, one frame at a time. The frames
+// where you'd still live are the click's window.
+namespace fw {
+    struct Snap { unsigned frame = ~0u; PlayerObject* g = nullptr; };
+    struct In { unsigned frame; bool down; };
+    struct Pending {
+        unsigned frame = 0; bool down = true; float pct = 0.f; int K = 8;
+        std::vector<PlayerObject*> snaps;      // snaps[i] = you at frame - K + i
+        int lo = 0, hi = 0;                    // how far it may move without passing your other clicks
+        unsigned end = 0;                      // replay up to this frame
+        bool ready = false, died = false;
+        int stage = 0;                         // 0: check the real timing, 1: earlier, 2: later
+        int k = 0, early = 0, late = 0;
+    };
+    std::vector<Snap> ring;
+    std::vector<In> inputs;                    // your jump inputs this attempt (player 1)
+    std::deque<Pending> pending;
+    std::deque<fwin::Result> results;
+    std::deque<std::pair<GameObject*, unsigned>> realAct;   // orbs/pads you used, and when
+    std::vector<PlayerObject*> pool, freeG;
+    unsigned lastSnap = ~0u;
+    int counted = 0;
+}
 static int const PLAN_BEAM = 14;      // how many candidate runs he keeps at once
 static int const PLAN_STEPS = 8;      // physics steps per decision (1/30 s)
 static bool s_trail = false;
@@ -262,6 +289,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     bool init(GJGameLevel* level, bool dontCreateObjects) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
+        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear(); fw::pool.clear(); fw::freeG.clear(); fw::lastSnap = ~0u;
         this->buildHud();
         auto f = m_fields.self();
         f->paths = CCDrawNode::create();
@@ -570,6 +598,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void resetLevel() {
         PlayLayer::resetLevel();
+        this->fwForgetAttempt();
         if (s_enabled && !m_isPlatformer && pathfinding(this->brain()) && m_isPracticeMode) {
             auto f = m_fields.self();
             log::info("[pf] respawn at x={:.1f} (top node x={:.1f})", m_player1 ? m_player1->m_position.x : -1.f,
@@ -607,6 +636,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (s_sim) { if (player == s_simGhost) s_ghostDead = true; return; }
+        if (player == m_player1 && object != m_anticheatSpike && !player->m_isDead) this->fwRealDeath();
         if (s_enabled && !m_isPlatformer && player == m_player1 && object != m_anticheatSpike && !player->m_isDead) {
             this->onCodaDeath(player->m_position.x, this->getCurrentPercent());
         }
@@ -1218,7 +1248,169 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
     }
 
+    // ------------------------------------------------ frame window counter
+    PlayerObject* fwGhost() {
+        if (!fw::freeG.empty()) { auto g = fw::freeG.back(); fw::freeG.pop_back(); return g; }
+        auto g = PlayerObject::create(1, 1, this, m_objectLayer, true);
+        if (!g) return nullptr;
+        if (m_player1 && m_player1->getParent()) m_player1->getParent()->addChild(g, -100);
+        g->setVisible(false);
+        fw::pool.push_back(g);
+        return g;
+    }
+    void fwFree(PlayerObject* g) { if (g) fw::freeG.push_back(g); }
+    void fwDrop(fw::Pending& p) { for (auto g : p.snaps) fwFree(g); p.snaps.clear(); }
+    void fwForgetAttempt() {
+        for (auto& p : fw::pending) fwDrop(p);
+        fw::pending.clear(); fw::inputs.clear(); fw::realAct.clear();
+        for (auto& s : fw::ring) s.frame = ~0u;
+        fw::lastSnap = ~0u;
+    }
+    void fwShutdown() {
+        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear();
+        for (auto g : fw::pool) if (g) g->removeFromParent();
+        fw::pool.clear(); fw::freeG.clear(); fw::lastSnap = ~0u;
+    }
+    bool fwActive() { return V::fwOn && !m_isPlatformer && m_player1 && !s_sim; }
+
+    // start of every physics step, before any click in it
+    void fwSnap() {
+        if (!fwActive() || m_player1->m_isDead) return;
+        unsigned cur = m_gameState.m_currentProgress;
+        if (cur == fw::lastSnap) return;
+        fw::lastSnap = cur;
+        size_t N = (size_t)std::clamp(V::fwMax, 2, 20) + 1;
+        if (fw::ring.size() != N) { for (auto& r : fw::ring) fwFree(r.g); fw::ring.assign(N, {}); }
+        auto& r = fw::ring[cur % N];
+        if (!r.g) r.g = fwGhost();
+        if (!r.g) return;
+        copyState(m_player1, r.g);
+        r.frame = cur;
+    }
+
+    void fwInput(bool down, int button, bool isPlayer1) {
+        if (!fwActive() || !isPlayer1 || button != 1 || m_player1->m_isDead) return;
+        unsigned cur = m_gameState.m_currentProgress;
+        unsigned prev = fw::inputs.empty() ? 0 : fw::inputs.back().frame;
+        bool hadPrev = !fw::inputs.empty();
+        fw::inputs.push_back({cur, down});
+        if (!down && !V::fwReleases) return;
+        fw::Pending p;
+        p.frame = cur; p.down = down; p.K = std::clamp(V::fwMax, 2, 20);
+        p.pct = m_levelLength > 0 ? 100.f * m_player1->m_position.x / m_levelLength : 0.f;
+        size_t N = fw::ring.size();
+        for (int i = 0; i <= p.K; i++) {
+            long long f = (long long)cur - p.K + i;
+            PlayerObject* g = nullptr;
+            if (f >= 0 && N) { auto& r = fw::ring[(size_t)f % N]; if (r.g && r.frame == (unsigned)f) { g = fwGhost(); if (g) copyState(r.g, g); } }
+            p.snaps.push_back(g);
+        }
+        p.lo = -p.K; p.hi = p.K;
+        if (hadPrev) p.lo = std::max(p.lo, -(int)(cur - prev) + 1);
+        while (!p.snaps.empty() && p.lo < 0 && !p.snaps[p.K + p.lo]) p.lo++;   // no copy that far back (just respawned)
+        fw::pending.push_back(std::move(p));
+        while (fw::pending.size() > 16) { fwDrop(fw::pending.front()); fw::pending.pop_front(); }
+    }
+
+    void fwRealDeath() {
+        unsigned cur = m_gameState.m_currentProgress;
+        for (auto& p : fw::pending) if (!p.ready && p.frame <= cur) { p.died = true; p.ready = true; }
+    }
+
+    // one replay of a click moved by k frames: do you live?
+    bool fwTry(fw::Pending const& p, int k) {
+        int startIdx = p.K + std::min(k, 0);
+        if (startIdx < 0 || startIdx >= (int)p.snaps.size() || !p.snaps[startIdx]) return false;
+        unsigned start = p.frame + std::min(k, 0);
+        auto g = fwGhost();
+        if (!g) return false;
+        copyState(p.snaps[startIdx], g);
+        // inputs to replay: yours, with this one moved
+        std::vector<fw::In> ins;
+        bool skipped = false;
+        for (auto& i : fw::inputs) {
+            if (i.frame < start || i.frame >= p.end) continue;
+            if (!skipped && i.frame == p.frame && i.down == p.down) { skipped = true; continue; }
+            ins.push_back(i);
+        }
+        ins.push_back({(unsigned)((int)p.frame + k), p.down});
+        std::stable_sort(ins.begin(), ins.end(), [](fw::In const& a, fw::In const& b) { return a.frame < b.frame; });
+        // orbs and pads you'd already used before this point stay used
+        std::unordered_set<GameObject*> act;
+        for (auto& [o, f] : fw::realAct) if (f < start) act.insert(o);
+        float dt = 60.f / (float)std::max(1, hacks::currentTps());
+        s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
+        size_t ii = 0;
+        bool alive = true;
+        for (unsigned f = start; f < p.end; f++) {
+            for (; ii < ins.size() && ins[ii].frame <= f; ii++) {
+                if (ins[ii].down) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
+            }
+            g->update(dt);
+            this->checkCollisions(g, dt, false);
+            if (s_ghostDead || g->m_isDead) { alive = false; break; }
+            g->updateRotation(dt);
+            if (s_ghostDone || g->m_position.x >= m_levelLength) break;
+        }
+        s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr; s_ghostDead = false;
+        fwFree(g);
+        return alive;
+    }
+
+    void fwFinish(fw::Pending& p, bool unknown) {
+        fwin::Result r;
+        r.frame = p.frame; r.down = p.down; r.pct = p.pct;
+        r.died = p.died; r.unknown = unknown && !p.died;
+        r.early = p.early; r.late = p.late;
+        r.capEarly = p.early >= -p.lo && p.lo == -p.K; r.capLate = p.late >= p.hi && p.hi == p.K;
+        r.tps = hacks::currentTps(); r.K = p.K;
+        r.shownAt = hacks::now();
+        fw::results.push_back(r);
+        while (fw::results.size() > 400) fw::results.pop_front();
+        if (!r.died && !r.unknown) fw::counted++;
+        fwDrop(p);
+    }
+
+    // a little work every frame: get clicks ready, then replay them until the time runs out
+    void fwUpdate() {
+        if (!V::fwOn || m_isPlatformer) { if (!fw::pending.empty()) fwForgetAttempt(); return; }
+        if (fw::pending.empty() || s_sim) return;
+        unsigned cur = m_gameState.m_currentProgress;
+        bool done = m_player1 && m_player1->m_position.x >= m_levelLength;
+        for (auto& p : fw::pending) {
+            if (p.ready) continue;
+            // the next click after this one decides how far to replay, and how late it may move
+            const fw::In* next = nullptr;
+            bool passed = false;
+            for (auto& i : fw::inputs) { if (passed && i.frame >= p.frame) { next = &i; break; } if (i.frame == p.frame && i.down == p.down) passed = true; }
+            unsigned need = next ? next->frame + 30 : p.frame + 150;
+            need = std::clamp(need, p.frame + 45, p.frame + 150);
+            if (cur >= need || done) {
+                p.ready = true; p.end = std::min(need, cur);
+                if (next) p.hi = std::min(p.hi, (int)(next->frame - p.frame) - 1);
+                p.hi = std::max(p.hi, 0);
+            }
+        }
+        auto t0 = std::chrono::steady_clock::now();
+        while (!fw::pending.empty()) {
+            auto& p = fw::pending.front();
+            if (!p.ready) break;
+            if (p.died) { fwFinish(p, false); fw::pending.pop_front(); continue; }
+            if (p.stage == 0) {
+                if (!fwTry(p, 0)) { fwFinish(p, true); fw::pending.pop_front(); continue; }   // the replay doesn't match what really happened
+                p.stage = 1; p.k = -1;
+            } else if (p.stage == 1) {
+                if (p.k >= p.lo && fwTry(p, p.k)) { p.early++; p.k--; } else { p.stage = 2; p.k = 1; }
+            } else {
+                if (p.k <= p.hi && fwTry(p, p.k)) { p.late++; p.k++; }
+                else { fwFinish(p, false); fw::pending.pop_front(); }
+            }
+            if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() > 3.0) break;
+        }
+    }
+
     void onQuit() {
+        this->fwShutdown();
         s_analyze = false;
         this->cleanupGhosts();
         CCDirector::get()->getScheduler()->setTimeScale(1.f);
@@ -1227,6 +1419,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
+        this->fwUpdate();
         auto f = m_fields.self();
         s_training = V::showPath;
         s_showThoughts = V::showThoughts;
@@ -1406,11 +1599,15 @@ class $modify(GJBaseGameLayer) {
         if (pl && pl == static_cast<GJBaseGameLayer*>(this) && s_enabled && !pl->m_isPlatformer && !s_fromBot) {
             return;   // Coda has the controls
         }
+        bool mine = pl && pl == static_cast<GJBaseGameLayer*>(this) && !s_sim;
+        if (mine) static_cast<CodaPlayLayer*>(pl)->fwSnap();
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
+        if (mine) static_cast<CodaPlayLayer*>(pl)->fwInput(down, button, isPlayer1);
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !s_sim) static_cast<CodaPlayLayer*>(pl)->fwSnap();
         if (pl && pl == static_cast<GJBaseGameLayer*>(this)) static_cast<CodaPlayLayer*>(pl)->codaStep();
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -1428,6 +1625,10 @@ class $modify(PlayerObject) {
 class $modify(EnhancedGameObject) {
     void activatedByPlayer(PlayerObject* player) {
         if (s_sim && player == s_simGhost) { if (s_simActivated) s_simActivated->insert(this); return; }
+        if (auto pl = PlayLayer::get(); pl && player == pl->m_player1 && V::fwOn) {
+            fw::realAct.push_back({this, pl->m_gameState.m_currentProgress});
+            while (fw::realAct.size() > 128) fw::realAct.pop_front();
+        }
         EnhancedGameObject::activatedByPlayer(player);
     }
     bool hasBeenActivatedByPlayer(PlayerObject* player) {
@@ -1486,6 +1687,11 @@ class $modify(CodaLevelInfoLayer, LevelInfoLayer) {
 };
 
 // ---------------------------------------------------------------- what the menu uses
+namespace fwin {
+    std::deque<Result>& results() { return fw::results; }
+    int waiting() { return (int)fw::pending.size(); }
+    void clear() { fw::results.clear(); fw::counted = 0; }
+}
 namespace bot {
     bool enabled() { return s_enabled; }
     bool simulating() { return s_sim; }
