@@ -697,6 +697,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
             auto& b = this->brain();
             if (pct > b.bestPct) b.bestPct = pct;
             say("Died at " + std::to_string((int)pct) + "%. Something moved that I couldn't see coming.", 2.5f);
+            log::info("[look] DIED x={:.1f} y={:.1f} yv={:.2f} mode={} mini={} upside={} held={} by obj id={} type={}", player->m_position.x, player->m_position.y,
+                      player->m_yVelocity, modeOf(player), player->m_vehicleSize < 0.9f, player->m_isUpsideDown, m_fields->held,
+                      object ? object->m_objectID : -1, object ? (int)object->m_objectType : -1);
             return PlayLayer::destroyPlayer(player, object);
         }
         if (s_enabled && !m_isPlatformer && player == m_player1 && object != m_anticheatSpike && !player->m_isDead) {
@@ -1135,6 +1138,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
                     while ((int)f->look.size() < H) f->look.push_back(f->look.back());
                 }
                 s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
+                log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
+                          modeOf(m_player1), m_player1->m_vehicleSize < 0.9f, m_player1->m_isUpsideDown, f->held, ok, H, depth);
             } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
             if (V::showPath && f->live) {
                 f->lookPath.clear();
@@ -1176,7 +1181,34 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
     void releaseGhost(PlayerObject* g) { if (g) m_fields->freeGhosts.push_back(g); }
 
+    static int modeOf(PlayerObject* p) {
+        if (p->m_isShip) return 1; if (p->m_isBall) return 2; if (p->m_isBird) return 3; if (p->m_isDart) return 4;
+        if (p->m_isRobot) return 5; if (p->m_isSpider) return 6; if (p->m_isSwing) return 7; return 0;
+    }
+    static void toggleMode(PlayerObject* p, int m, bool on) {
+        switch (m) {
+            case 1: p->toggleFlyMode(on, true); break;
+            case 2: p->toggleRollMode(on, true); break;
+            case 3: p->toggleBirdMode(on, true); break;
+            case 4: p->toggleDartMode(on, true); break;
+            case 5: p->toggleRobotMode(on, true); break;
+            case 6: p->toggleSpiderMode(on, true); break;
+            case 7: p->toggleSwingMode(on, true); break;
+            default: break;
+        }
+    }
+    // The invisible player has to really BE the same gamemode and size as the real one (with the
+    // mode's own physics and hitbox), not just have the flag set, or ship/ufo/wave predictions are wrong.
     static void copyState(PlayerObject* src, PlayerObject* dst) {
+        int ms = modeOf(src), md = modeOf(dst);
+        if (ms != md) {
+            bool wasSim = s_sim; s_sim = true;
+            if (md) toggleMode(dst, md, false);
+            if (ms) toggleMode(dst, ms, true);
+            s_sim = wasSim;
+        }
+        bool miniS = src->m_vehicleSize < 0.9f, miniD = dst->m_vehicleSize < 0.9f;
+        if (miniS != miniD) dst->togglePlayerScale(miniS, true);
         dst->copyAttributes(src);
         dst->setPosition(src->getPosition());
         dst->setRotation(src->getRotation());
@@ -1460,11 +1492,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
             CCPoint prev = this->ghostPos(g);
             auto col = press ? ccc4f(0.96f, 0.64f, 0.71f, 0.95f) : ccc4f(1.f, 1.f, 1.f, 0.85f);
+            float dt = this->lookDt();
             for (int i = 0; i < steps; i++) {
-                g->update(0.25f);
-                this->checkCollisions(g, 0.25f, false);
+                g->update(dt);
+                this->checkCollisions(g, dt, false);
                 if (s_ghostDead || g->m_isDead) break;
-                g->updateRotation(0.25f);
+                g->updateRotation(dt);
                 CCPoint p = this->ghostPos(g);
                 f->traj->drawSegment(prev, p, 1.3f, col);
                 prev = p;
@@ -1659,6 +1692,11 @@ class $modify(GJBaseGameLayer) {
     void activateSFXTrigger(SFXTriggerGameObject* object) { if (s_sim) return; GJBaseGameLayer::activateSFXTrigger(object); }
     void gameEventTriggered(GJGameEvent event, int material, int playerID) { if (s_sim) return; GJBaseGameLayer::gameEventTriggered(event, material, playerID); }
     void updateTimeWarp(float timeWarp) { if (s_sim) return; GJBaseGameLayer::updateTimeWarp(timeWarp); }
+    // a mode portal touched by the invisible player must not move the real camera / flying bounds
+    void playerWillSwitchMode(PlayerObject* player, GameObject* object) {
+        if (s_sim && player == s_simGhost) { if (player && object) player->m_lastPortalPos = object->getPosition(); return; }
+        GJBaseGameLayer::playerWillSwitchMode(player, object);
+    }
     void applyTimeWarp(float timeWarp) { if (s_sim) return; GJBaseGameLayer::applyTimeWarp(timeWarp); }
     void lightningFlash(CCPoint from, CCPoint to, ccColor3B color, float lineWidth, float duration, int displacement, bool flash, float opacity) {
         if (s_sim) return;
