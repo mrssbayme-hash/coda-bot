@@ -6,6 +6,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/EnhancedGameObject.hpp>
+#include <Geode/modify/EffectGameObject.hpp>
 #include <Geode/modify/LevelInfoLayer.hpp>
 #include <random>
 #include <deque>
@@ -110,8 +111,45 @@ static PlayerObject* s_simGhost = nullptr;
 static std::unordered_set<GameObject*>* s_simActivated = nullptr;
 // Speed portals the invisible player touches must not change the real level's speed (that delays
 // the music and the level). Everything speed-related is saved before a simulation and put back after.
+// Portals, orbs, pads and triggers remember that they were used. The invisible player must never
+// leave that mark on them, or the real player skips them later (a skipped speed portal = level out of
+// sync with the music). Their flags are saved before a simulation and put back after.
+struct ActFlags { GameObject* o; EnhancedGameObject* e; bool a, b, c, d; };
+static std::vector<GameObject*> s_interactive;      // sorted by x
+static GJBaseGameLayer* s_interactiveFor = nullptr;
+static void buildInteractive(GJBaseGameLayer* l) {
+    s_interactive.clear();
+    s_interactiveFor = l;
+    if (!l->m_objects) return;
+    for (auto o : CCArrayExt<GameObject*>(l->m_objects)) {
+        if (!o) continue;
+        switch (o->m_objectType) {
+            case GameObjectType::Solid: case GameObjectType::Hazard: case GameObjectType::Decoration:
+            case GameObjectType::Slope: case GameObjectType::AnimatedHazard: case GameObjectType::Breakable: break;
+            default: s_interactive.push_back(o);
+        }
+    }
+    std::sort(s_interactive.begin(), s_interactive.end(), [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
+}
+static void saveFlags(GJBaseGameLayer* l, float fromX, float toX, std::vector<ActFlags>& out) {
+    if (s_interactiveFor != l) buildInteractive(l);
+    auto it = std::lower_bound(s_interactive.begin(), s_interactive.end(), fromX, [](GameObject* o, float x) { return o->getPositionX() < x; });
+    for (; it != s_interactive.end() && (*it)->getPositionX() <= toX; ++it) {
+        auto o = *it;
+        auto e = typeinfo_cast<EnhancedGameObject*>(o);
+        out.push_back({o, e, o->m_isActivated, e ? e->m_activated : false, e ? e->m_activatedByPlayer1 : false, e ? e->m_activatedByPlayer2 : false});
+    }
+}
+static void restoreFlags(std::vector<ActFlags> const& v) {
+    for (auto& f : v) {
+        f.o->m_isActivated = f.a;
+        if (f.e) { f.e->m_activated = f.b; f.e->m_activatedByPlayer1 = f.c; f.e->m_activatedByPlayer2 = f.d; }
+    }
+}
+
 struct SimGuard {
     GJBaseGameLayer* l;
+    std::vector<ActFlags> flags;
     float bgx, bgy, mgx, mgy, warp, qwarp, warpRel, timeMod;
     bool timeMod2;
     float sp1 = 0.f, sp2 = 0.f;
@@ -122,6 +160,8 @@ struct SimGuard {
         warp = g.m_timeWarp; qwarp = g.m_queuedTimeWarp; warpRel = g.m_timeWarpRelated; timeMod = g.m_timeModRelated; timeMod2 = g.m_timeModRelated2;
         if (l->m_player1) { sp1 = l->m_player1->m_playerSpeed; mul1 = l->m_player1->m_speedMultiplier; }
         if (l->m_player2) { sp2 = l->m_player2->m_playerSpeed; mul2 = l->m_player2->m_speedMultiplier; }
+        float x = l->m_player1 ? l->m_player1->m_position.x : 0.f;
+        saveFlags(l, x - 120.f, x + 2600.f, flags);
     }
     ~SimGuard() {
         auto& g = l->m_gameState;
@@ -129,6 +169,7 @@ struct SimGuard {
         g.m_timeWarp = warp; g.m_queuedTimeWarp = qwarp; g.m_timeWarpRelated = warpRel; g.m_timeModRelated = timeMod; g.m_timeModRelated2 = timeMod2;
         if (l->m_player1) { l->m_player1->m_playerSpeed = sp1; l->m_player1->m_speedMultiplier = mul1; }
         if (l->m_player2) { l->m_player2->m_playerSpeed = sp2; l->m_player2->m_speedMultiplier = mul2; }
+        restoreFlags(flags);
     }
 };
 
@@ -280,6 +321,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         CCLabelBMFont* anaThought = nullptr;
         CCDrawNode* anaBar = nullptr;
         CCDrawNode* traj = nullptr;
+        // follow-the-trajectory mode
+        std::deque<char> look;           // hold or not, for each physics step ahead
+        int lookTick = 0;
+        std::vector<CCPoint> lookPath;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -363,6 +408,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // Slow plays every attempt from the start; High and Extreme practice from checkpoints.
     void applyMode() {
         auto& b = this->brain();
+        if (V::codaLookahead) {
+            this->removeAllCheckpoints();
+            b.cps.clear(); b.cpX = 0.f; b.confirm = false;
+            if (m_isPracticeMode) this->togglePracticeMode(false);
+            m_fields->look.clear();
+            s_thought = "Following my trajectory.";
+            return;
+        }
         if (s_pathOnly) {
             this->removeAllCheckpoints();
             b.cps.clear(); b.cpX = 0.f; b.confirm = false;
@@ -434,6 +487,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         if (!s_enabled || m_isPlatformer || !m_player1 || m_player1->m_isDead) return;
         if (f->planning || f->planShow > 0.f) return;
+        if (V::codaLookahead) { this->lookStep(); return; }
         float x = m_player1->m_position.x;
         auto& b = this->brain();
         if (pathfinding(b) && m_isPracticeMode) { this->pfStep(x); return; }
@@ -594,6 +648,13 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void resetLevel() {
         PlayLayer::resetLevel();
+        if (s_enabled && !m_isPlatformer && V::codaLookahead) {
+            auto f = m_fields.self();
+            s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
+            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear();
+            this->brain().attempts++;
+            return;
+        }
         if (s_enabled && !m_isPlatformer && pathfinding(this->brain()) && m_isPracticeMode) {
             auto f = m_fields.self();
             log::info("[pf] respawn at x={:.1f} (top node x={:.1f})", m_player1 ? m_player1->m_position.x : -1.f,
@@ -631,6 +692,13 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (s_sim) { if (player == s_simGhost) s_ghostDead = true; return; }
+        if (s_enabled && !m_isPlatformer && V::codaLookahead && player == m_player1 && !player->m_isDead && object != m_anticheatSpike) {
+            float pct = this->getCurrentPercent();
+            auto& b = this->brain();
+            if (pct > b.bestPct) b.bestPct = pct;
+            say("Died at " + std::to_string((int)pct) + "%. Something moved that I couldn't see coming.", 2.5f);
+            return PlayLayer::destroyPlayer(player, object);
+        }
         if (s_enabled && !m_isPlatformer && player == m_player1 && object != m_anticheatSpike && !player->m_isDead) {
             this->onCodaDeath(player->m_position.x, this->getCurrentPercent());
         }
@@ -933,6 +1001,158 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
 
+    // ============================================================ follow the trajectory
+    // Every couple of physics steps Coda looks about 0.6 s ahead with an invisible copy of himself.
+    // If the plan he's on still survives, he keeps it. If it dies, he searches hold / let go branches
+    // (fine steps close by, coarser further out) and takes the safest one that survives.
+    // Because he re-checks from where he really is all the time, moving parts are seen as they move.
+    int lookHorizon() { return std::max(30, hacks::currentTps() * 6 / 10); }
+    float lookDt() { return 60.f / (float)std::max(1, hacks::currentTps()); }
+
+    void ensureHazards() {
+        auto f = m_fields.self();
+        if (!f->hazards.empty() && f->lookTick % 240 != 0) return;
+        f->hazards.clear();
+        if (!m_objects) return;
+        for (auto obj : CCArrayExt<GameObject*>(m_objects))
+            if (obj && (obj->m_objectType == GameObjectType::Hazard || obj->m_objectType == GameObjectType::AnimatedHazard)) f->hazards.push_back(obj->getObjectRect());
+        std::sort(f->hazards.begin(), f->hazards.end(), [](CCRect const& a, CCRect const& b) { return a.getMinX() < b.getMinX(); });
+        if (f->hazards.empty()) f->hazards.push_back(CCRect(-1e7f, -1e7f, 1.f, 1.f));
+    }
+
+    // runs `ticks` physics steps holding `press`; false if the ghost died
+    bool lookRun(PlayerObject* g, bool press, bool& held, int ticks, std::unordered_set<GameObject*>& act, float& clear, bool& done,
+                 std::vector<CCPoint>* path = nullptr) {
+        float dt = this->lookDt();
+        s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDone = false;
+        if (press != held) { if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump); held = press; }
+        bool alive = true;
+        for (int i = 0; i < ticks; i++) {
+            s_ghostDead = false;
+            g->update(dt);
+            this->checkCollisions(g, dt, false);
+            if (s_ghostDead || g->m_isDead) { alive = false; break; }
+            g->updateRotation(dt);
+            clear = std::min(clear, this->clearance(g->getObjectRect()));
+            if (path) path->push_back(this->ghostPos(g));
+            if (s_ghostDone || g->m_position.x >= m_levelLength) { done = true; break; }
+        }
+        s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr;
+        return alive;
+    }
+
+    // how many steps of `plan` the player survives from right now
+    int lookCheck(std::deque<char> const& plan, std::vector<CCPoint>* path = nullptr) {
+        auto f = m_fields.self();
+        auto g = this->acquireGhost();
+        if (!g) return 0;
+        copyState(m_player1, g);
+        std::unordered_set<GameObject*> act;
+        SimGuard guard(this);
+        bool held = f->held, done = false;
+        float clear = 1e9f;
+        int ok = 0;
+        for (size_t i = 0; i < plan.size(); i++) {
+            if (!this->lookRun(g, plan[i] != 0, held, 1, act, clear, done, path)) break;
+            ok++;
+            if (done) { ok = (int)plan.size(); break; }
+        }
+        this->releaseGhost(g);
+        return ok;
+    }
+
+    std::deque<char> lookSearch(int& bestDepth) {
+        auto f = m_fields.self();
+        struct E { PlayerObject* g; bool held; std::vector<char> seq; float clear; std::unordered_set<GameObject*> act; };
+        int tpsScale = std::max(1, hacks::currentTps() / 240);
+        std::vector<int> segs;
+        int total = 0, H = this->lookHorizon();
+        for (int s : {1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4}) { segs.push_back(s * tpsScale); total += s * tpsScale; }
+        while (total < H) { segs.push_back(8 * tpsScale); total += 8 * tpsScale; }
+        SimGuard guard(this);
+        std::vector<E> beam;
+        auto g0 = this->acquireGhost();
+        if (!g0) { bestDepth = 0; return {}; }
+        copyState(m_player1, g0);
+        beam.push_back({g0, f->held, {}, 1e9f, {}});
+        std::vector<char> best;
+        bestDepth = 0;
+        bool finished = false;
+        for (size_t d = 0; d < segs.size() && !beam.empty() && !finished; d++) {
+            std::vector<E> kids;
+            for (auto& e : beam) {
+                for (int c = 0; c < 2; c++) {
+                    bool press = c == 0 ? e.held : !e.held;        // try keeping what he's doing first
+                    auto g = this->acquireGhost();
+                    if (!g) continue;
+                    copyState(e.g, g);
+                    E k{g, e.held, e.seq, e.clear, e.act};
+                    bool done = false;
+                    if (!this->lookRun(g, press, k.held, segs[d], k.act, k.clear, done)) { this->releaseGhost(g); continue; }
+                    k.seq.insert(k.seq.end(), segs[d], (char)press);
+                    if (done) { best = k.seq; bestDepth = H; finished = true; this->releaseGhost(g); break; }
+                    kids.push_back(std::move(k));
+                }
+                if (finished) break;
+            }
+            for (auto& e : beam) this->releaseGhost(e.g);
+            beam.clear();
+            if (finished) { for (auto& k : kids) this->releaseGhost(k.g); break; }
+            if (kids.empty()) break;
+            std::sort(kids.begin(), kids.end(), [](E const& a, E const& b) { return a.clear > b.clear; });
+            if ((int)kids[0].seq.size() > bestDepth) { bestDepth = (int)kids[0].seq.size(); best = kids[0].seq; }
+            std::unordered_set<long long> seen;
+            for (auto& k : kids) {
+                auto* g = k.g;
+                long long key = ((long long)std::lround(g->m_position.y / 1.5f) << 32) ^ ((long long)std::lround(g->m_yVelocity * 8.0) << 12) ^
+                                ((long long)this->iconOf(g) << 4) ^ ((long long)g->m_isUpsideDown << 2) ^ ((long long)k.held << 1) ^ (long long)g->m_isOnGround;
+                if ((int)beam.size() < 12 && seen.insert(key).second) beam.push_back(std::move(k));
+                else this->releaseGhost(g);
+            }
+        }
+        if (!beam.empty()) {        // everything left survived the whole horizon: the safest one wins
+            auto it = std::max_element(beam.begin(), beam.end(), [](E const& a, E const& b) { return a.clear < b.clear; });
+            best = it->seq; bestDepth = H;
+            for (auto& e : beam) this->releaseGhost(e.g);
+        }
+        return std::deque<char>(best.begin(), best.end());
+    }
+
+    void lookStep() {
+        auto f = m_fields.self();
+        this->ensureHazards();
+        int H = this->lookHorizon();
+        if (!f->look.empty()) f->look.pop_front();
+        while ((int)f->look.size() < H) f->look.push_back(f->look.empty() ? (char)f->held : f->look.back());
+        int step = std::max(1, hacks::currentTps() / 120);
+        if (f->lookTick % step == 0) {
+            int ok = this->lookCheck(f->look);
+            if (ok < H) {
+                int depth = 0;
+                auto np = this->lookSearch(depth);
+                if (!np.empty() && depth > ok) {
+                    f->look = std::move(np);
+                    while ((int)f->look.size() < H) f->look.push_back(f->look.back());
+                }
+                s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
+            } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
+            if (V::showPath && f->live) {
+                f->lookPath.clear();
+                this->lookCheck(f->look, &f->lookPath);
+                f->live->clear();
+                for (size_t i = 1; i < f->lookPath.size(); i++) f->live->drawSegment(f->lookPath[i - 1], f->lookPath[i], 1.6f, ccc4f(0.96f, 0.64f, 0.71f, 0.9f));
+            }
+        }
+        f->lookTick++;
+        bool want = !f->look.empty() && f->look.front();
+        if (want != f->held) {
+            s_fromBot = true;
+            this->handleButton(want, 1, true);
+            s_fromBot = false;
+            f->held = want;
+        }
+    }
+
     // ============================================================ the planner
     // Reads every hazard hitbox, then simulates an invisible copy of the player with the game's own
     // physics. At every decision (1/30 s) each candidate run branches into "hold" and "let go";
@@ -1172,7 +1392,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         if (!f->used) return PlayLayer::levelComplete();
         // Blocked: no completion, no rewards, no verifying.
-        if (s_enabled) {
+        if (s_enabled && V::codaLookahead) {
+            auto& b = this->brain();
+            b.beaten = true; b.bestPct = 100.f;
+            say("Followed my trajectory all the way. Beaten in " + std::to_string(std::max(1, b.attempts)) + " attempts. (Doesn't count.)", 4.f);
+        } else if (s_enabled) {
             auto& b = this->brain();
             if (pathfinding(b)) { f->play = holdsFrom(b.nodes); b.guide = f->play; b.nodes.clear(); }
             b.beaten = true;
@@ -1434,6 +1658,8 @@ class $modify(GJBaseGameLayer) {
     void checkpointActivated(CheckpointGameObject* object) { if (s_sim) return; GJBaseGameLayer::checkpointActivated(object); }
     void activateSFXTrigger(SFXTriggerGameObject* object) { if (s_sim) return; GJBaseGameLayer::activateSFXTrigger(object); }
     void gameEventTriggered(GJGameEvent event, int material, int playerID) { if (s_sim) return; GJBaseGameLayer::gameEventTriggered(event, material, playerID); }
+    void updateTimeWarp(float timeWarp) { if (s_sim) return; GJBaseGameLayer::updateTimeWarp(timeWarp); }
+    void applyTimeWarp(float timeWarp) { if (s_sim) return; GJBaseGameLayer::applyTimeWarp(timeWarp); }
     void lightningFlash(CCPoint from, CCPoint to, ccColor3B color, float lineWidth, float duration, int displacement, bool flash, float opacity) {
         if (s_sim) return;
         GJBaseGameLayer::lightningFlash(from, to, color, lineWidth, duration, displacement, flash, opacity);
@@ -1465,6 +1691,10 @@ class $modify(PlayerObject) {
         if (s_sim && this != s_simGhost) return;
         PlayerObject::updateTimeMod(speed, s_sim ? true : noEffects);
     }
+};
+
+class $modify(EffectGameObject) {
+    void triggerActivated(float x) { if (s_sim) return; EffectGameObject::triggerActivated(x); }
 };
 
 // Orbs, pads and touch triggers remember who used them. The invisible player keeps its own list,

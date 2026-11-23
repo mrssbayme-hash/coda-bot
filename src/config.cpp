@@ -240,6 +240,8 @@ namespace cfg {
         add(B("ac-p2", "Player 2 too", "Coda Bot", &acP2, "", "autoclicker"));
         add(on(cheat(B("pathfinder", "Coda plays (pathfinder)", "Coda Bot", &pathfinder, "Coda finds a path through the level himself.")),
             [] { bot::setEnabled(V::pathfinder); }));
+        add(on(B("coda-lookahead", "Follow the trajectory", "Coda Bot", &codaLookahead, "Coda looks ahead with his trajectory all the time and takes whatever way survives. Off = his old learning pathfinder.", "pathfinder"),
+            [] { if (bot::enabled()) { bot::setEnabled(false); bot::setEnabled(true); } }));
         add(B("show-thoughts", "Show his thoughts", "Coda Bot", &showThoughts, "", "pathfinder"));
         add(B("show-path", "Show his path", "Coda Bot", &showPath, "", "pathfinder"));
         add(B("analyze-button", "Analyze button on levels", "Coda Bot", &analyzeButton, "A Coda button on level pages that works out a route, then plays it."));
