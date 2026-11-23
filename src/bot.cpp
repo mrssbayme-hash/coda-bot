@@ -697,6 +697,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (s_sim) {
+            if (object && object == m_anticheatSpike) return;     // GD's hidden anti-cheat spike never kills the real player either
             if (player == s_simGhost) {
                 s_ghostDead = true;
                 s_killInfo = fmt::format("obj id={} type={} at ({:.0f},{:.0f}) ghost ({:.1f},{:.1f}) yv={:.2f}", object ? object->m_objectID : -1,
@@ -1342,6 +1343,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
         dst->m_platformerXVelocity = src->m_platformerXVelocity;
         dst->m_holdingButtons = src->m_holdingButtons;
         dst->m_isDead = false;
+        // a ghost that once flew out of bounds kept that flag forever and died instantly on every reuse
+        dst->m_isOutOfBounds = src->m_isOutOfBounds;
+        dst->m_isLocked = src->m_isLocked;
     }
 
     float clearance(CCRect const& r) {

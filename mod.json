@@ -5,7 +5,7 @@
  },
  "id": "coda.coda-bot",
  "name": "Coda Menu",
- "version": "v2.7.4",
+ "version": "v2.7.5",
  "developer": "Coda",
  "description": "Coda's own mod menu: hitboxes, noclip, trails, FPS and TPS bypass, a replay bot, a frame window counter and more. Press ~ to open. Hacked runs never count: no verifying, no completions.",
  "resources": {
