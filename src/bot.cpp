@@ -1026,7 +1026,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // If the plan he's on still survives, he keeps it. If it dies, he searches hold / let go branches
     // (fine steps close by, coarser further out) and takes the safest one that survives.
     // Because he re-checks from where he really is all the time, moving parts are seen as they move.
-    int lookHorizon() { return std::clamp(hacks::currentTps() * 6 / 10, 30, 600); }
+    int lookHorizon() { return std::clamp(hacks::currentTps() * 8 / 10, 30, 800); }
     float lookDt() { return 60.f / (float)std::max(1, hacks::currentTps()); }
 
     void ensureHazards() {
@@ -1057,6 +1057,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 alive = false; break;
             }
             g->updateRotation(dt);
+            g->m_position = g->getPosition();      // the game does this for the real player every step; the copy has to too
             clear = std::min(clear, this->clearance(g->getObjectRect()));
             if (path) path->push_back(this->ghostPos(g));
             if (s_ghostDone || g->m_position.x >= m_levelLength) { done = true; break; }
@@ -1066,7 +1067,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     // how many steps of `plan` the player survives from right now
-    int lookCheck(std::deque<char> const& plan, std::vector<CCPoint>* path = nullptr) {
+    int lookCheck(std::deque<char> const& plan, std::vector<CCPoint>* path = nullptr, float* clearOut = nullptr) {
         auto f = m_fields.self();
         auto g = this->acquireGhost();
         if (!g) return 0;
@@ -1081,11 +1082,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
             ok++;
             if (done) { ok = (int)plan.size(); break; }
         }
+        if (clearOut) *clearOut = clear;
         this->releaseGhost(g);
         return ok;
     }
 
-    std::deque<char> lookSearch(int& bestDepth) {
+    std::deque<char> lookSearch(int& bestDepth, float* bestClear = nullptr) {
         auto f = m_fields.self();
         struct E { PlayerObject* g; bool held; std::vector<char> seq; float clear; std::unordered_set<GameObject*> act; };
         int tpsScale = std::max(1, hacks::currentTps() / 240);
@@ -1137,6 +1139,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!beam.empty()) {        // everything left survived the whole horizon: the safest one wins
             auto it = std::max_element(beam.begin(), beam.end(), [](E const& a, E const& b) { return a.clear < b.clear; });
             best = it->seq; bestDepth = H;
+            if (bestClear) *bestClear = it->clear;
             for (auto& e : beam) this->releaseGhost(e.g);
         }
         return std::deque<char>(best.begin(), best.end());
@@ -1223,7 +1226,17 @@ class $modify(CodaPlayLayer, PlayLayer) {
         while ((int)f->look.size() < H) f->look.push_back(f->look.empty() ? (char)f->held : f->look.back());
         int step = std::max(1, hacks::currentTps() / 120);
         if (f->lookTick % step == 0 && !overBudget()) {
-            int ok = this->lookCheck(f->look);
+            float clear = 1e9f;
+            int ok = this->lookCheck(f->look, nullptr, &clear);
+            if (ok >= H && clear < 6.f && f->lookTick % (step * 4) == 0) {
+                // survives, but only by a hair: small prediction errors would kill him. Look for room.
+                int d = 0; float c = 0.f;
+                auto np = this->lookSearch(d, &c);
+                if (d >= H && c > clear + 2.f) {
+                    f->look = std::move(np);
+                    while ((int)f->look.size() < H) f->look.push_back(f->look.back());
+                }
+            }
             if (ok < H) {
                 int depth = 0;
                 auto np = this->lookSearch(depth);
@@ -1408,6 +1421,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             this->checkCollisions(g, 0.25f, false);
             if (s_ghostDead || g->m_isDead) break;
             g->updateRotation(0.25f);
+            g->m_position = g->getPosition();
             clear = std::min(clear, this->clearance(g->getObjectRect()));
             if (g->m_position.x >= m_levelLength) { s_ghostDone = true; break; }
         }
@@ -1423,7 +1437,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         g->update(dt);
         this->checkCollisions(g, dt, false);
         bool alive = !s_ghostDead && !g->m_isDead;
-        if (alive) g->updateRotation(dt);
+        if (alive) { g->updateRotation(dt); g->m_position = g->getPosition(); }
         done = alive && g->m_position.x >= m_levelLength;
         s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr;
         return alive;
@@ -1644,6 +1658,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 this->checkCollisions(g, dt, false);
                 if (s_ghostDead || g->m_isDead) break;
                 g->updateRotation(dt);
+                g->m_position = g->getPosition();
                 CCPoint p = this->ghostPos(g);
                 f->traj->drawSegment(prev, p, 1.3f, col);
                 prev = p;
