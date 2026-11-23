@@ -333,6 +333,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         bool predValid = false, predDead = false;
         double predX = 0, predY = 0, predYV = 0;
         int predMode = 0, desyncLogs = 0, probeLogs = 0;
+        unsigned lastTick = ~0u;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -659,7 +660,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (s_enabled && !m_isPlatformer && V::codaLookahead) {
             auto f = m_fields.self();
             s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
-            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0; f->probeLogs = 0;
+            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0; f->probeLogs = 0; f->lastTick = ~0u;
             this->brain().attempts++;
             return;
         }
@@ -1213,6 +1214,17 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void lookStep() {
         auto f = m_fields.self();
+        // GD can call this more than once per physics step (half steps). The plan is one entry per
+        // physics step, so only move along it when the game really took a step.
+        unsigned tickNow = m_gameState.m_currentProgress;
+        if (f->lastTick != ~0u && tickNow == f->lastTick) {
+            bool want = !f->look.empty() && f->look.front();
+            if (want != f->held) { s_fromBot = true; this->handleButton(want, 1, true); s_fromBot = false; f->held = want; }
+            return;
+        }
+        int advance = f->lastTick == ~0u ? 1 : std::clamp((int)(tickNow - f->lastTick), 1, 64);
+        f->lastTick = tickNow;
+        for (int i = 1; i < advance && !f->look.empty(); i++) f->look.pop_front();
         // compare last step's one-step prediction with what really happened
         if (V::codaDebugLog && f->predValid && f->desyncLogs < 60 && f->lookTick > 30) {
             double dy = m_player1->m_position.y - f->predY, dx = m_player1->m_position.x - f->predX;
@@ -1393,6 +1405,34 @@ class $modify(CodaPlayLayer, PlayLayer) {
         dst->m_isRising = src->m_isRising;
         dst->m_lastPortalPos = src->m_lastPortalPos;
         dst->m_lastActivatedPortal = src->m_lastActivatedPortal;
+        // jump / landing bookkeeping: without it the copy could jump in mid-air (or not jump on landing)
+        dst->m_ringJumpedSincePress = src->m_ringJumpedSincePress;
+        dst->m_usedRings = src->m_usedRings;
+        dst->m_stateRingJump = src->m_stateRingJump;
+        dst->m_statePreJump = src->m_statePreJump;
+        dst->m_wasJumpBuffered = src->m_wasJumpBuffered;
+        dst->m_brokeBlockSincePress = src->m_brokeBlockSincePress;
+        dst->m_landedSinceFlip = src->m_landedSinceFlip;
+        dst->m_specialGroundHit = src->m_specialGroundHit;
+        dst->m_touchingGround = src->m_touchingGround;
+        dst->m_wasTouchingGround = src->m_wasTouchingGround;
+        dst->m_stateOnGround = src->m_stateOnGround;
+        dst->m_groundObjectMaterial = src->m_groundObjectMaterial;
+        dst->m_stateNoStickX = src->m_stateNoStickX; dst->m_stateNoStickY = src->m_stateNoStickY;
+        dst->m_stateUnk2 = src->m_stateUnk2;
+        dst->m_stateBoostX = src->m_stateBoostX; dst->m_stateBoostY = src->m_stateBoostY;
+        dst->m_stateNoWallPush = src->m_stateNoWallPush;
+        dst->m_stateScale = src->m_stateScale;
+        dst->m_stateNoAutoJump = src->m_stateNoAutoJump;
+        dst->m_stateDartSlide = src->m_stateDartSlide;
+        dst->m_stateHitHead = src->m_stateHitHead;
+        dst->m_stateFlipGravity = src->m_stateFlipGravity;
+        dst->m_stateForce = src->m_stateForce;
+        dst->m_isBallRotating = src->m_isBallRotating;
+        dst->m_lastLandTime = src->m_lastLandTime;
+        dst->m_lastJumpTime = src->m_lastJumpTime;
+        dst->m_lastFlipTime = src->m_lastFlipTime;
+        dst->m_lastGroundXDeltaTime = src->m_lastGroundXDeltaTime;
     }
     static void cloneDict(CCDictionary* from, CCDictionary* to) {
         if (!from || !to || from == to) return;
