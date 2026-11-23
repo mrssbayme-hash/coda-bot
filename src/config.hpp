@@ -92,6 +92,8 @@ namespace V {
     inline bool frameAdvance = false;
     inline bool autoclicker = false, acP2 = false;
     inline int acHold = 2, acRelease = 2;
+    inline bool fwcOverlay = true;
+    inline float fwcScale = 1.f;
     inline bool pathfinder = false, showThoughts = true, showPath = false, analyzeButton = false;
     // Level Roulette
     inline int rlList = 0, rlFrom = 1, rlTo = 150, rlMaxFps = 240;

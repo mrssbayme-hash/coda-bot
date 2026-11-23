@@ -231,6 +231,8 @@ namespace cfg {
         // Coda Bot
         add(B("bot-pos-fix", "Position fix", "Coda Bot", &botPosFix, "Saves where you were on every click and puts you back there on playback. Much more accurate."));
         add(I("bot-offset", "Frame offset", "Coda Bot", &botOffset, -3, 3));
+        add(B("fwc-overlay", "Frame window overlay", "Coda Bot", &fwcOverlay, "Shows the frame window counter on screen while it counts."));
+        add(F("fwc-scale", "Size", "Coda Bot", &fwcScale, .5f, 2.f, "%.2fx", "fwc-overlay"));
         add(cheat(B("frame-advance", "Frame advance", "Coda Bot", &frameAdvance, "Freezes the game. Press the step key (F) to move one physics step.")));
         add(cheat(B("autoclicker", "Autoclicker", "Coda Bot", &autoclicker)));
         add(I("ac-hold", "Hold (steps)", "Coda Bot", &acHold, 1, 120, "autoclicker"));

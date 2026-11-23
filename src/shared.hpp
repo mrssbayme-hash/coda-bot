@@ -3,6 +3,8 @@
 #include <Geode/Geode.hpp>
 #include <deque>
 #include <string>
+#include <vector>
+#include <unordered_set>
 
 namespace menu {
     bool isOpen();
@@ -36,6 +38,38 @@ namespace replay {
     size_t playIndex();
     unsigned lastFrame();
     std::string status();
+    void countWindows();      // play the macro and measure every input's frame window
+}
+
+// Invisible-player physics, shared from bot.cpp
+namespace sim {
+    PlayerObject* makeGhost();                       // a hidden player you own (lives until the level closes)
+    void copy(PlayerObject* from, PlayerObject* to);
+    void button(PlayerObject* g, bool down);
+    bool tick(PlayerObject* g, std::unordered_set<GameObject*>& act, float dt, bool& reachedEnd);   // false = died
+}
+
+// Frame Window Counter (fwc.cpp)
+namespace fwc {
+    struct Window {
+        unsigned tick = 0;
+        bool down = true;        // click or release
+        float pct = 0.f;         // where in the level
+        int early = 0, late = 0; // how many steps earlier / later still work
+        float frames = 0.f;      // window size in 240 Hz frames
+        bool cappedEarly = false, cappedLate = false;   // hit another input or the search limit
+        bool unknown = false;    // the simulation couldn't reproduce this input
+    };
+    bool counting();
+    void begin(int tps);
+    void add(Window const& w);
+    void finish(bool completed);
+    void cancel();
+    std::vector<Window> const& results();
+    int tps();
+    bool saveReport(std::string const& macroName);
+    void drawOverlay();          // the NaN-style counter on screen
+    void drawPanel();            // results inside the Coda Bot window
 }
 
 // Bypasses and gameplay hacks (hacks.cpp)

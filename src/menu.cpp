@@ -252,6 +252,7 @@ namespace {
         }
         ImGui::TextDisabled("%zu inputs%s", replay::inputCount(), st == replay::State::Playing ? "" : "");
         ImGui::Separator();
+        fwc::drawPanel();
     }
 
     void codaStatus() {
@@ -476,6 +477,7 @@ namespace {
         float speed = V::menuAnim ? io.DeltaTime * 8.f : 1.f;
         s_anim = s_anim < target ? std::min(target, s_anim + speed) : std::max(target, s_anim - speed);
         drawLabels();
+        fwc::drawOverlay();
         if (s_anim > .001f) {
             if (V::dimGame) ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 8, 20, (int)(110 * s_anim)));
             ImGui::GetStyle().Alpha = s_anim;

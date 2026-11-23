@@ -993,6 +993,18 @@ class $modify(CodaPlayLayer, PlayLayer) {
         return alive;
     }
 
+    // One physics step for an invisible player (used by the frame window counter).
+    bool simTick(PlayerObject* g, std::unordered_set<GameObject*>& act, float dt, bool& done) {
+        s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
+        g->update(dt);
+        this->checkCollisions(g, dt, false);
+        bool alive = !s_ghostDead && !g->m_isDead;
+        if (alive) g->updateRotation(dt);
+        done = alive && g->m_position.x >= m_levelLength;
+        s_sim = false; s_simGhost = nullptr; s_simActivated = nullptr;
+        return alive;
+    }
+
     void startPlanning() {
         auto f = m_fields.self();
         f->needPlan = false;
@@ -1508,5 +1520,27 @@ namespace bot {
             if (p) p->codaStop();
         }
         if (p) { p->redrawPaths(); p->refreshDebugDraw(); }
+    }
+}
+
+// ---------------------------------------------------------------- simulation tools for other parts of the mod
+namespace sim {
+    PlayerObject* makeGhost() {
+        auto pl = PlayLayer::get();
+        if (!pl || !pl->m_player1 || !pl->m_player1->getParent()) return nullptr;
+        auto g = PlayerObject::create(1, 1, pl, pl->m_objectLayer, true);
+        if (!g) return nullptr;
+        pl->m_player1->getParent()->addChild(g, -100);
+        g->setVisible(false);
+        return g;
+    }
+    void copy(PlayerObject* from, PlayerObject* to) { CodaPlayLayer::copyState(from, to); }
+    void button(PlayerObject* g, bool down) {
+        if (down) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
+    }
+    bool tick(PlayerObject* g, std::unordered_set<GameObject*>& act, float dt, bool& done) {
+        auto pl = PlayLayer::get();
+        if (!pl || !g) { done = false; return false; }
+        return static_cast<CodaPlayLayer*>(pl)->simTick(g, act, dt, done);
     }
 }
