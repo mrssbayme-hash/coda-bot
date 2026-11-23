@@ -108,6 +108,30 @@ static bool s_ghostDead = false;
 static bool s_ghostDone = false;
 static PlayerObject* s_simGhost = nullptr;
 static std::unordered_set<GameObject*>* s_simActivated = nullptr;
+// Speed portals the invisible player touches must not change the real level's speed (that delays
+// the music and the level). Everything speed-related is saved before a simulation and put back after.
+struct SimGuard {
+    GJBaseGameLayer* l;
+    float bgx, bgy, mgx, mgy, warp, qwarp, warpRel, timeMod;
+    bool timeMod2;
+    float sp1 = 0.f, sp2 = 0.f;
+    double mul1 = 0.0, mul2 = 0.0;
+    explicit SimGuard(GJBaseGameLayer* layer) : l(layer) {
+        auto& g = l->m_gameState;
+        bgx = g.m_backgroundSpeedX; bgy = g.m_backgroundSpeedY; mgx = g.m_middlegroundSpeedX; mgy = g.m_middlegroundSpeedY;
+        warp = g.m_timeWarp; qwarp = g.m_queuedTimeWarp; warpRel = g.m_timeWarpRelated; timeMod = g.m_timeModRelated; timeMod2 = g.m_timeModRelated2;
+        if (l->m_player1) { sp1 = l->m_player1->m_playerSpeed; mul1 = l->m_player1->m_speedMultiplier; }
+        if (l->m_player2) { sp2 = l->m_player2->m_playerSpeed; mul2 = l->m_player2->m_speedMultiplier; }
+    }
+    ~SimGuard() {
+        auto& g = l->m_gameState;
+        g.m_backgroundSpeedX = bgx; g.m_backgroundSpeedY = bgy; g.m_middlegroundSpeedX = mgx; g.m_middlegroundSpeedY = mgy;
+        g.m_timeWarp = warp; g.m_queuedTimeWarp = qwarp; g.m_timeWarpRelated = warpRel; g.m_timeModRelated = timeMod; g.m_timeModRelated2 = timeMod2;
+        if (l->m_player1) { l->m_player1->m_playerSpeed = sp1; l->m_player1->m_speedMultiplier = mul1; }
+        if (l->m_player2) { l->m_player2->m_playerSpeed = sp2; l->m_player2->m_speedMultiplier = mul2; }
+    }
+};
+
 static int const PLAN_BEAM = 14;      // how many candidate runs he keeps at once
 static int const PLAN_STEPS = 8;      // physics steps per decision (1/30 s)
 static bool s_trail = false;
@@ -975,6 +999,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     bool simSegment(PlayerObject* g, bool press, bool& held, std::unordered_set<GameObject*>& act, float& clear) {
+        SimGuard guard(this);
         s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
         if (press != held) {
             if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
@@ -995,6 +1020,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     // One physics step for an invisible player (used by the frame window counter).
     bool simTick(PlayerObject* g, std::unordered_set<GameObject*>& act, float dt, bool& done) {
+        SimGuard guard(this);
         s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
         g->update(dt);
         this->checkCollisions(g, dt, false);
@@ -1205,6 +1231,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (!g) return;
             copyState(m_player1, g);
             std::unordered_set<GameObject*> act;
+            SimGuard guard(this);
             s_sim = true; s_simGhost = g; s_simActivated = &act; s_ghostDead = false; s_ghostDone = false;
             if (press) g->pushButton(PlayerButton::Jump); else g->releaseButton(PlayerButton::Jump);
             CCPoint prev = this->ghostPos(g);
@@ -1433,6 +1460,11 @@ class $modify(PlayerObject) {
     void playSpiderDashEffect(CCPoint from, CCPoint to) { if (s_sim && this == s_simGhost) return; PlayerObject::playSpiderDashEffect(from, to); }
     void spawnPortalCircle(ccColor3B color, float startRadius) { if (s_sim && this == s_simGhost) return; PlayerObject::spawnPortalCircle(color, startRadius); }
     void incrementJumps() { if (s_sim && this == s_simGhost) return; PlayerObject::incrementJumps(); }
+    // a speed portal hit by the invisible player only changes the invisible player
+    void updateTimeMod(float speed, bool noEffects) {
+        if (s_sim && this != s_simGhost) return;
+        PlayerObject::updateTimeMod(speed, s_sim ? true : noEffects);
+    }
 };
 
 // Orbs, pads and touch triggers remember who used them. The invisible player keeps its own list,
