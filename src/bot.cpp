@@ -106,6 +106,7 @@ static bool s_hitboxes = false;
 // planner simulation: while s_sim is on, the game is moving an invisible copy of the player
 static bool s_sim = false;
 static bool s_ghostDead = false;
+static std::string s_killInfo;    // what killed the invisible player last (for the log)
 static bool s_ghostDone = false;
 static PlayerObject* s_simGhost = nullptr;
 static std::unordered_set<GameObject*>* s_simActivated = nullptr;
@@ -328,7 +329,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         // self-check: what the look-ahead said the next step would be
         bool predValid = false, predDead = false;
         double predX = 0, predY = 0, predYV = 0;
-        int predMode = 0, desyncLogs = 0;
+        int predMode = 0, desyncLogs = 0, probeLogs = 0;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -655,7 +656,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (s_enabled && !m_isPlatformer && V::codaLookahead) {
             auto f = m_fields.self();
             s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
-            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0;
+            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0; f->probeLogs = 0;
             this->brain().attempts++;
             return;
         }
@@ -695,7 +696,15 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
-        if (s_sim) { if (player == s_simGhost) s_ghostDead = true; return; }
+        if (s_sim) {
+            if (player == s_simGhost) {
+                s_ghostDead = true;
+                s_killInfo = fmt::format("obj id={} type={} at ({:.0f},{:.0f}) ghost ({:.1f},{:.1f}) yv={:.2f}", object ? object->m_objectID : -1,
+                                         object ? (int)object->m_objectType : -1, object ? object->getPositionX() : 0.f, object ? object->getPositionY() : 0.f,
+                                         player->m_position.x, player->m_position.y, player->m_yVelocity);
+            }
+            return;
+        }
         if (s_enabled && !m_isPlatformer && V::codaLookahead && player == m_player1 && !player->m_isDead && object != m_anticheatSpike) {
             float pct = this->getCurrentPercent();
             auto& b = this->brain();
@@ -1038,7 +1047,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
             s_ghostDead = false;
             g->update(dt);
             this->checkCollisions(g, dt, false);
-            if (s_ghostDead || g->m_isDead) { alive = false; break; }
+            if (s_ghostDead || g->m_isDead) {
+                if (!s_ghostDead) s_killInfo = fmt::format("m_isDead set, no destroyPlayer; ghost ({:.1f},{:.1f})", g->m_position.x, g->m_position.y);
+                alive = false; break;
+            }
             g->updateRotation(dt);
             clear = std::min(clear, this->clearance(g->getObjectRect()));
             if (path) path->push_back(this->ghostPos(g));
@@ -1125,12 +1137,35 @@ class $modify(CodaPlayLayer, PlayLayer) {
         return std::deque<char>(best.begin(), best.end());
     }
 
+    // log what happens if he holds (or lets go) for half a second from right now
+    void lookProbe(bool press) {
+        auto g = this->acquireGhost();
+        if (!g) return;
+        copyState(m_player1, g);
+        std::unordered_set<GameObject*> act;
+        SimGuard guard(this);
+        bool held = m_fields->held, done = false;
+        float clear = 1e9f;
+        std::string ys;
+        s_killInfo.clear();
+        int t = 0;
+        bool alive = true;
+        for (; t < 120; t++) {
+            if (!this->lookRun(g, press, held, 1, act, clear, done)) { alive = false; break; }
+            if (t % 10 == 0) ys += fmt::format(" {:.0f}", g->m_position.y);
+            if (done) break;
+        }
+        log::info("[look] probe {} mode={} ground={} yv0={:.2f}: {} after {} steps, y:{} {}", press ? "HOLD" : "LETGO", modeOf(g), m_player1->m_isOnGround,
+                  m_player1->m_yVelocity, alive ? "alive" : "DIED", t, ys, alive ? "" : s_killInfo);
+        this->releaseGhost(g);
+    }
+
     void lookStep() {
         auto f = m_fields.self();
         // compare last step's one-step prediction with what really happened
-        if (f->predValid && f->desyncLogs < 40) {
+        if (f->predValid && f->desyncLogs < 60 && f->lookTick > 30) {
             double dy = m_player1->m_position.y - f->predY, dx = m_player1->m_position.x - f->predX;
-            if (std::abs(dy) > 0.6 || std::abs(dx) > 0.6 || f->predMode != modeOf(m_player1)) {
+            if (std::abs(dy) > 0.6 || std::abs(dx) > 3.0 || f->predMode != modeOf(m_player1)) {
                 f->desyncLogs++;
                 log::warn("[look] DESYNC mode pred={} real={} | x pred={:.2f} real={:.2f} | y pred={:.2f} real={:.2f} | yv pred={:.3f} real={:.3f} | held={} ground={}",
                           f->predMode, modeOf(m_player1), f->predX, m_player1->m_position.x, f->predY, m_player1->m_position.y,
@@ -1155,6 +1190,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
                 log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
                           modeOf(m_player1), m_player1->m_vehicleSize < 0.9f, m_player1->m_isUpsideDown, f->held, ok, H, depth);
+                if (depth < H && f->probeLogs < 12) { f->probeLogs++; this->lookProbe(true); this->lookProbe(false); }
             } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
             if (V::showPath && f->live) {
                 f->lookPath.clear();
