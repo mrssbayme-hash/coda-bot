@@ -1137,27 +1137,66 @@ class $modify(CodaPlayLayer, PlayLayer) {
         return std::deque<char>(best.begin(), best.end());
     }
 
-    // log what happens if he holds (or lets go) for half a second from right now
-    void lookProbe(bool press) {
+    // Simple "hold for N steps, then let go" (or the opposite) plans. Used two ways: logged as probes
+    // when he's stuck, and tried as extra options when the normal search can't find a way through.
+    std::vector<int> holdLengths() {
+        int tps = std::max(1, hacks::currentTps());
+        std::vector<int> v;
+        for (int ms : {0, 60, 125, 250, 375, 500, 625, 750, 875, 1000}) v.push_back(tps * ms / 1000);
+        return v;
+    }
+    // returns steps survived (up to `total`), fills `info` for the log
+    int runHoldPlan(bool firstPress, int firstLen, int total, std::string* info) {
         auto g = this->acquireGhost();
-        if (!g) return;
+        if (!g) return 0;
         copyState(m_player1, g);
         std::unordered_set<GameObject*> act;
         SimGuard guard(this);
         bool held = m_fields->held, done = false;
         float clear = 1e9f;
-        std::string ys;
         s_killInfo.clear();
+        std::string ys;
         int t = 0;
         bool alive = true;
-        for (; t < 120; t++) {
+        for (; t < total; t++) {
+            bool press = t < firstLen ? firstPress : !firstPress;
             if (!this->lookRun(g, press, held, 1, act, clear, done)) { alive = false; break; }
-            if (t % 10 == 0) ys += fmt::format(" {:.0f}", g->m_position.y);
-            if (done) break;
+            if (info && t % 24 == 0) ys += fmt::format(" {:.0f}", g->m_position.y);
+            if (done) { t = total; break; }
         }
-        log::info("[look] probe {} mode={} ground={} yv0={:.2f}: {} after {} steps, y:{} {}", press ? "HOLD" : "LETGO", modeOf(g), m_player1->m_isOnGround,
-                  m_player1->m_yVelocity, alive ? "alive" : "DIED", t, ys, alive ? "" : s_killInfo);
+        if (info) *info = fmt::format("{} after {} steps, y:{} {}", alive ? "alive" : "DIED", t, ys, alive ? "" : s_killInfo);
         this->releaseGhost(g);
+        return t;
+    }
+    void lookProbes() {
+        int tps = std::max(1, hacks::currentTps()), total = tps * 3 / 2;
+        log::info("[look] probes at x={:.1f} y={:.1f} mode={} ground={} yv={:.2f} held={}", m_player1->m_position.x, m_player1->m_position.y,
+                  modeOf(m_player1), m_player1->m_isOnGround, m_player1->m_yVelocity, m_fields->held);
+        for (int len : this->holdLengths()) {
+            std::string info;
+            this->runHoldPlan(true, len, total, &info);
+            log::info("[look]   hold {:>4}ms then let go: {}", len * 1000 / tps, info);
+        }
+        std::string info;
+        this->runHoldPlan(true, total, total, &info);
+        log::info("[look]   hold the whole time:    {}", info);
+    }
+    // best "hold N then let go" / "let go N then hold" plan, as per-step choices
+    std::deque<char> holdPlanSearch(int H, int& depth) {
+        depth = 0;
+        std::deque<char> best;
+        for (bool first : {true, false}) {
+            for (int len : this->holdLengths()) {
+                int got = this->runHoldPlan(first, len, H, nullptr);
+                if (got > depth) {
+                    depth = got;
+                    best.clear();
+                    for (int t = 0; t < H; t++) best.push_back((char)(t < len ? first : !first));
+                }
+                if (depth >= H) return best;
+            }
+        }
+        return best;
     }
 
     void lookStep() {
@@ -1183,6 +1222,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (ok < H) {
                 int depth = 0;
                 auto np = this->lookSearch(depth);
+                if (depth < H) {
+                    int d2 = 0;
+                    auto hp = this->holdPlanSearch(H, d2);
+                    if (d2 > depth) { np = std::move(hp); depth = d2; }
+                }
                 if (!np.empty() && depth > ok) {
                     f->look = std::move(np);
                     while ((int)f->look.size() < H) f->look.push_back(f->look.back());
@@ -1190,7 +1234,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
                 log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
                           modeOf(m_player1), m_player1->m_vehicleSize < 0.9f, m_player1->m_isUpsideDown, f->held, ok, H, depth);
-                if (depth < H && f->probeLogs < 12) { f->probeLogs++; this->lookProbe(true); this->lookProbe(false); }
+                if (depth < H && f->probeLogs < 12) { f->probeLogs++; this->lookProbes(); }
             } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
             if (V::showPath && f->live) {
                 f->lookPath.clear();
