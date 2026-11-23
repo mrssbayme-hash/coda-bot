@@ -336,6 +336,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         unsigned lastTick = ~0u;
         int lastOk = 0;          // how many steps the current plan survived at the last check
         int stepLogs = 0;
+        std::string predInfo;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -1266,6 +1267,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 log::warn("[look] DESYNC mode pred={} real={} | x pred={:.2f} real={:.2f} | y pred={:.2f} real={:.2f} | yv pred={:.3f} real={:.3f} | held={} ground={}",
                           f->predMode, modeOf(m_player1), f->predX, m_player1->getPositionX(), f->predY, m_player1->getPositionY(),
                           f->predYV, m_player1->m_yVelocity, f->held, m_player1->m_isOnGround);
+                log::warn("[look]   {}", f->predInfo);
             }
         }
         f->predValid = false;
@@ -1323,6 +1325,14 @@ class $modify(CodaPlayLayer, PlayLayer) {
             bool alive = this->lookRun(g, want, held, 1, act, clear, done);
             f->predValid = true; f->predDead = !alive;
             f->predX = g->m_position.x; f->predY = g->m_position.y; f->predYV = g->m_yVelocity; f->predMode = modeOf(g);
+            auto p = m_player1;
+            std::string used;
+            for (auto o : act) used += fmt::format(" id{}/t{}@{:.0f},{:.0f}", o->m_objectID, (int)o->m_objectType, o->getPositionX(), o->getPositionY());
+            f->predInfo = fmt::format("want={} | real: ringSincePress={} usedRings={} jumpBuf={} stateJumpBuf={} preJump={} stateRing={} onGround={} touchGround={} | "
+                                      "copy after: ringSincePress={} usedRings={} jumpBuf={} | copy used:{}",
+                                      want, p->m_ringJumpedSincePress, p->m_usedRings.size(), p->m_jumpBuffered, (int)p->m_stateJumpBuffered, p->m_statePreJump,
+                                      p->m_stateRingJump, p->m_isOnGround, p->m_touchingGround,
+                                      g->m_ringJumpedSincePress, g->m_usedRings.size(), g->m_jumpBuffered, used.empty() ? " nothing" : used);
             this->releaseGhost(g);
         }
         if (want != f->held) {
