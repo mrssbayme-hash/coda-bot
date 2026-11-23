@@ -258,7 +258,7 @@ class $modify(ReplayBaseLayer, GJBaseGameLayer) {
         i.frame = m_gameState.m_currentProgress;
         i.down = down; i.button = button; i.p2 = !isPlayer1;
         auto p = isPlayer1 ? m_player1 : m_player2;
-        if (p) { i.hasPos = true; i.x = p->m_position.x; i.y = p->m_position.y; i.yv = p->m_yVelocity; i.rot = p->getRotation(); }
+        if (p) { i.hasPos = true; i.x = p->getPositionX(); i.y = p->getPositionY(); i.yv = p->m_yVelocity; i.rot = p->getRotation(); }   // node position: m_position is only refreshed once per frame
         s_inputs.push_back(i);
     }
 

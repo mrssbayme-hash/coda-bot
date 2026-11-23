@@ -1229,11 +1229,11 @@ class $modify(CodaPlayLayer, PlayLayer) {
         for (int i = 1; i < advance && !f->look.empty(); i++) f->look.pop_front();
         // compare last step's one-step prediction with what really happened
         if (V::codaDebugLog && f->predValid && f->desyncLogs < 60 && f->lookTick > 30) {
-            double dy = m_player1->m_position.y - f->predY, dx = m_player1->m_position.x - f->predX;
+            double dy = m_player1->getPositionY() - f->predY, dx = m_player1->getPositionX() - f->predX;
             if (std::abs(dy) > 0.6 || std::abs(dx) > 3.0 || f->predMode != modeOf(m_player1)) {
                 f->desyncLogs++;
                 log::warn("[look] DESYNC mode pred={} real={} | x pred={:.2f} real={:.2f} | y pred={:.2f} real={:.2f} | yv pred={:.3f} real={:.3f} | held={} ground={}",
-                          f->predMode, modeOf(m_player1), f->predX, m_player1->m_position.x, f->predY, m_player1->m_position.y,
+                          f->predMode, modeOf(m_player1), f->predX, m_player1->getPositionX(), f->predY, m_player1->getPositionY(),
                           f->predYV, m_player1->m_yVelocity, f->held, m_player1->m_isOnGround);
             }
         }
@@ -1356,7 +1356,9 @@ class $modify(CodaPlayLayer, PlayLayer) {
         dst->copyAttributes(src);
         dst->setPosition(src->getPosition());
         dst->setRotation(src->getRotation());
-        dst->m_position = src->m_position;
+        // GD only refreshes m_position on the last physics step of each frame; the node position is the
+        // up-to-date one. Copying the stale m_position put every mid-frame copy a few steps back in time.
+        dst->m_position = src->getPosition();
         dst->m_yVelocity = src->m_yVelocity;
         dst->m_isOnGround = src->m_isOnGround;
         dst->m_isUpsideDown = src->m_isUpsideDown;
