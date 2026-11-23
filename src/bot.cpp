@@ -1073,6 +1073,23 @@ class $modify(CodaPlayLayer, PlayLayer) {
         return alive;
     }
 
+    // Cube, ball and spider can't steer in the air. If the look-ahead ends while he's still in the air
+    // in one of those, a jump could look safe and then land on a spike just past the horizon.
+    // So keep falling (no input) until he lands: true = lands safely (or never lands within 1.5 s).
+    bool landsSafely(PlayerObject* g, bool held, std::unordered_set<GameObject*>& act) {
+        int m = modeOf(g);
+        if (m != 0 && m != 2 && m != 6) return true;
+        if (g->m_isOnGround) return true;
+        int maxSteps = std::max(60, hacks::currentTps() * 3 / 2);
+        float clear = 1e9f;
+        bool done = false;
+        for (int i = 0; i < maxSteps; i++) {
+            if (!this->lookRun(g, false, held, 1, act, clear, done)) return false;
+            if (done || g->m_isOnGround) return true;
+        }
+        return true;
+    }
+
     // how many steps of `plan` the player survives from right now
     int lookCheck(std::deque<char> const& plan, std::vector<CCPoint>* path = nullptr, float* clearOut = nullptr) {
         auto f = m_fields.self();
@@ -1089,6 +1106,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
             ok++;
             if (done) { ok = (int)plan.size(); break; }
         }
+        // survived the whole plan but still mid-air in a mode that can't steer: make sure the landing is safe
+        if (ok == (int)plan.size() && !done && !path && !this->landsSafely(g, held, act)) ok = (int)plan.size() - 1;
         if (clearOut) *clearOut = clear;
         this->releaseGhost(g);
         return ok;
@@ -1142,6 +1161,18 @@ class $modify(CodaPlayLayer, PlayLayer) {
                 if ((int)beam.size() < 12 && seen.insert(key).second) beam.push_back(std::move(k));
                 else this->releaseGhost(g);
             }
+        }
+        if (!beam.empty()) {
+            // survivors still in the air (cube / ball / spider) must also land safely
+            std::vector<E> safe;
+            for (auto& e : beam) {
+                auto g = this->acquireGhost();
+                bool ok = true;
+                if (g) { copyState(e.g, g); auto act = e.act; ok = this->landsSafely(g, e.held, act); this->releaseGhost(g); }
+                if (ok) safe.push_back(std::move(e)); else this->releaseGhost(e.g);
+            }
+            beam = std::move(safe);
+            if (beam.empty() && bestDepth >= H) bestDepth = H - 1;
         }
         if (!beam.empty()) {        // everything left survived the whole horizon: the safest one wins
             auto it = std::max_element(beam.begin(), beam.end(), [](E const& a, E const& b) { return a.clear < b.clear; });
@@ -1962,7 +1993,11 @@ class $modify(EnhancedGameObject) {
         EnhancedGameObject::activatedByPlayer(player);
     }
     bool hasBeenActivatedByPlayer(PlayerObject* player) {
-        if (s_sim && player == s_simGhost) return s_simActivated && s_simActivated->count(this);
+        if (s_sim && player == s_simGhost) {
+            if (s_simActivated && s_simActivated->count(this)) return true;
+            auto pl = PlayLayer::get();    // something the real player already used is used up for the copy too
+            return pl && pl->m_player1 && EnhancedGameObject::hasBeenActivatedByPlayer(pl->m_player1);
+        }
         return EnhancedGameObject::hasBeenActivatedByPlayer(player);
     }
 };
