@@ -325,6 +325,10 @@ class $modify(CodaPlayLayer, PlayLayer) {
         std::deque<char> look;           // hold or not, for each physics step ahead
         int lookTick = 0;
         std::vector<CCPoint> lookPath;
+        // self-check: what the look-ahead said the next step would be
+        bool predValid = false, predDead = false;
+        double predX = 0, predY = 0, predYV = 0;
+        int predMode = 0, desyncLogs = 0;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -651,7 +655,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (s_enabled && !m_isPlatformer && V::codaLookahead) {
             auto f = m_fields.self();
             s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
-            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear();
+            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0;
             this->brain().attempts++;
             return;
         }
@@ -1123,6 +1127,17 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     void lookStep() {
         auto f = m_fields.self();
+        // compare last step's one-step prediction with what really happened
+        if (f->predValid && f->desyncLogs < 40) {
+            double dy = m_player1->m_position.y - f->predY, dx = m_player1->m_position.x - f->predX;
+            if (std::abs(dy) > 0.6 || std::abs(dx) > 0.6 || f->predMode != modeOf(m_player1)) {
+                f->desyncLogs++;
+                log::warn("[look] DESYNC mode pred={} real={} | x pred={:.2f} real={:.2f} | y pred={:.2f} real={:.2f} | yv pred={:.3f} real={:.3f} | held={} ground={}",
+                          f->predMode, modeOf(m_player1), f->predX, m_player1->m_position.x, f->predY, m_player1->m_position.y,
+                          f->predYV, m_player1->m_yVelocity, f->held, m_player1->m_isOnGround);
+            }
+        }
+        f->predValid = false;
         this->ensureHazards();
         int H = this->lookHorizon();
         if (!f->look.empty()) f->look.pop_front();
@@ -1150,6 +1165,18 @@ class $modify(CodaPlayLayer, PlayLayer) {
         }
         f->lookTick++;
         bool want = !f->look.empty() && f->look.front();
+        // one-step prediction for the self-check above
+        if (auto g = this->acquireGhost()) {
+            copyState(m_player1, g);
+            std::unordered_set<GameObject*> act;
+            SimGuard guard(this);
+            bool held = f->held, done = false;
+            float clear = 1e9f;
+            bool alive = this->lookRun(g, want, held, 1, act, clear, done);
+            f->predValid = true; f->predDead = !alive;
+            f->predX = g->m_position.x; f->predY = g->m_position.y; f->predYV = g->m_yVelocity; f->predMode = modeOf(g);
+            this->releaseGhost(g);
+        }
         if (want != f->held) {
             s_fromBot = true;
             this->handleButton(want, 1, true);
