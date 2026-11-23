@@ -106,7 +106,10 @@ static bool s_hitboxes = false;
 // planner simulation: while s_sim is on, the game is moving an invisible copy of the player
 static bool s_sim = false;
 static bool s_ghostDead = false;
-static std::string s_killInfo;    // what killed the invisible player last (for the log)
+static std::string s_killInfo;
+static long long s_simTicksFrame = 0;           // invisible-player steps simulated this frame
+static long long const SIM_TICKS_PER_FRAME = 40000;
+static bool overBudget() { return s_simTicksFrame > SIM_TICKS_PER_FRAME; }    // what killed the invisible player last (for the log)
 static bool s_ghostDone = false;
 static PlayerObject* s_simGhost = nullptr;
 static std::unordered_set<GameObject*>* s_simActivated = nullptr;
@@ -1023,7 +1026,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // If the plan he's on still survives, he keeps it. If it dies, he searches hold / let go branches
     // (fine steps close by, coarser further out) and takes the safest one that survives.
     // Because he re-checks from where he really is all the time, moving parts are seen as they move.
-    int lookHorizon() { return std::max(30, hacks::currentTps() * 6 / 10); }
+    int lookHorizon() { return std::clamp(hacks::currentTps() * 6 / 10, 30, 600); }
     float lookDt() { return 60.f / (float)std::max(1, hacks::currentTps()); }
 
     void ensureHazards() {
@@ -1046,6 +1049,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         bool alive = true;
         for (int i = 0; i < ticks; i++) {
             s_ghostDead = false;
+            s_simTicksFrame++;
             g->update(dt);
             this->checkCollisions(g, dt, false);
             if (s_ghostDead || g->m_isDead) {
@@ -1098,7 +1102,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         std::vector<char> best;
         bestDepth = 0;
         bool finished = false;
-        for (size_t d = 0; d < segs.size() && !beam.empty() && !finished; d++) {
+        for (size_t d = 0; d < segs.size() && !beam.empty() && !finished && !overBudget(); d++) {
             std::vector<E> kids;
             for (auto& e : beam) {
                 for (int c = 0; c < 2; c++) {
@@ -1218,7 +1222,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (!f->look.empty()) f->look.pop_front();
         while ((int)f->look.size() < H) f->look.push_back(f->look.empty() ? (char)f->held : f->look.back());
         int step = std::max(1, hacks::currentTps() / 120);
-        if (f->lookTick % step == 0) {
+        if (f->lookTick % step == 0 && !overBudget()) {
             int ok = this->lookCheck(f->look);
             if (ok < H) {
                 int depth = 0;
@@ -1233,7 +1237,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
                     while ((int)f->look.size() < H) f->look.push_back(f->look.back());
                 }
                 s_thought = depth >= H ? "Found a way through." : "I can't see a safe way... going for it.";
-                log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
+                if (depth < H) log::info("[look] replan x={:.1f} y={:.1f} mode={} mini={} upside={} held={} kept={}/{} found={}", m_player1->m_position.x, m_player1->m_position.y,
                           modeOf(m_player1), m_player1->m_vehicleSize < 0.9f, m_player1->m_isUpsideDown, f->held, ok, H, depth);
                 if (depth < H && f->probeLogs < 12) { f->probeLogs++; this->lookProbes(); }
             } else if (s_thought != "Following my trajectory." && f->lookTick % 120 == 0) s_thought = "Following my trajectory.";
@@ -1247,7 +1251,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         f->lookTick++;
         bool want = !f->look.empty() && f->look.front();
         // one-step prediction for the self-check above
-        if (auto g = this->acquireGhost()) {
+        if (auto g = overBudget() ? nullptr : this->acquireGhost()) {
             copyState(m_player1, g);
             std::unordered_set<GameObject*> act;
             SimGuard guard(this);
@@ -1346,6 +1350,38 @@ class $modify(CodaPlayLayer, PlayLayer) {
         // a ghost that once flew out of bounds kept that flag forever and died instantly on every reuse
         dst->m_isOutOfBounds = src->m_isOutOfBounds;
         dst->m_isLocked = src->m_isLocked;
+        // What the player is touching right now. Without this, a copy made while the real player slides
+        // along a block thinks it's stuck inside that block and gets squished on its first step.
+        cloneDict(src->m_collisionLogTop, dst->m_collisionLogTop);
+        cloneDict(src->m_collisionLogBottom, dst->m_collisionLogBottom);
+        cloneDict(src->m_collisionLogLeft, dst->m_collisionLogLeft);
+        cloneDict(src->m_collisionLogRight, dst->m_collisionLogRight);
+        dst->m_lastCollisionBottom = src->m_lastCollisionBottom; dst->m_lastCollisionTop = src->m_lastCollisionTop;
+        dst->m_lastCollisionLeft = src->m_lastCollisionLeft; dst->m_lastCollisionRight = src->m_lastCollisionRight;
+        dst->m_prevCollisionBottom = src->m_prevCollisionBottom; dst->m_prevCollisionTop = src->m_prevCollisionTop;
+        dst->m_maybeLastGroundObject = src->m_maybeLastGroundObject;
+        dst->m_preLastGroundObject = src->m_preLastGroundObject;
+        dst->m_lastGroundObject = src->m_lastGroundObject;
+        dst->m_collidedObject = src->m_collidedObject;
+        dst->m_collidingWithLeft = src->m_collidingWithLeft; dst->m_collidingWithRight = src->m_collidingWithRight;
+        dst->m_collidingBetweenSteps = src->m_collidingBetweenSteps;
+        dst->m_currentSlope = src->m_currentSlope; dst->m_currentSlope2 = src->m_currentSlope2;
+        dst->m_currentPotentialSlope = src->m_currentPotentialSlope; dst->m_noPotentialSlope = src->m_noPotentialSlope;
+        dst->m_isCollidingWithSlope = src->m_isCollidingWithSlope;
+        dst->m_slopeAngle = src->m_slopeAngle; dst->m_slopeStartTime = src->m_slopeStartTime;
+        dst->m_slopeSlidingMaybeRotated = src->m_slopeSlidingMaybeRotated;
+        dst->m_yVelocityBeforeSlope = src->m_yVelocityBeforeSlope;
+        dst->m_groundYVelocity = src->m_groundYVelocity;
+        dst->m_yVelocityRelated = src->m_yVelocityRelated;
+        dst->m_isRising = src->m_isRising;
+        dst->m_lastPortalPos = src->m_lastPortalPos;
+        dst->m_lastActivatedPortal = src->m_lastActivatedPortal;
+    }
+    static void cloneDict(CCDictionary* from, CCDictionary* to) {
+        if (!from || !to || from == to) return;
+        to->removeAllObjects();
+        CCDictElement* el = nullptr;
+        CCDICT_FOREACH(from, el) { to->setObject(el->getObject(), el->getIntKey()); }   // GD keys these by object id
     }
 
     float clearance(CCRect const& r) {
@@ -1633,6 +1669,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     }
 
     void postUpdate(float dt) {
+        s_simTicksFrame = 0;
         PlayLayer::postUpdate(dt);
         auto f = m_fields.self();
         s_training = V::showPath;
