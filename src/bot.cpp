@@ -1380,8 +1380,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     static void cloneDict(CCDictionary* from, CCDictionary* to) {
         if (!from || !to || from == to) return;
         to->removeAllObjects();
-        CCDictElement* el = nullptr;
-        CCDICT_FOREACH(from, el) { to->setObject(el->getObject(), el->getIntKey()); }   // GD keys these by object id
+        for (auto [k, v] : CCDictionaryExt<intptr_t, CCObject*>(from)) to->setObject(v, k);   // GD keys these by object id
     }
 
     float clearance(CCRect const& r) {
