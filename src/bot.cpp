@@ -132,6 +132,8 @@ namespace fw {
     std::deque<fwin::Result> results;
     std::deque<std::pair<GameObject*, unsigned>> realAct;   // orbs/pads you used, and when
     std::vector<PlayerObject*> pool, freeG;
+    struct NewClick { unsigned frame; bool down; float pct; int lo; };
+    std::vector<NewClick> fresh;               // clicks from this step, saved at the start of the next one
     unsigned lastSnap = ~0u;
     int counted = 0;
 }
@@ -289,7 +291,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     bool init(GJGameLevel* level, bool dontCreateObjects) {
         if (!PlayLayer::init(level, dontCreateObjects)) return false;
-        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear(); fw::pool.clear(); fw::freeG.clear(); fw::lastSnap = ~0u;
+        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear(); fw::pool.clear(); fw::freeG.clear(); fw::fresh.clear(); fw::lastSnap = ~0u;
         this->buildHud();
         auto f = m_fields.self();
         f->paths = CCDrawNode::create();
@@ -1251,7 +1253,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
     // ------------------------------------------------ frame window counter
     PlayerObject* fwGhost() {
         if (!fw::freeG.empty()) { auto g = fw::freeG.back(); fw::freeG.pop_back(); return g; }
-        auto g = PlayerObject::create(1, 1, this, m_objectLayer, true);
+        auto g = PlayerObject::create(1, 1, this, m_objectLayer, false);   // false: never treated as a real player
         if (!g) return nullptr;
         if (m_player1 && m_player1->getParent()) m_player1->getParent()->addChild(g, -100);
         g->setVisible(false);
@@ -1262,12 +1264,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
     void fwDrop(fw::Pending& p) { for (auto g : p.snaps) fwFree(g); p.snaps.clear(); }
     void fwForgetAttempt() {
         for (auto& p : fw::pending) fwDrop(p);
-        fw::pending.clear(); fw::inputs.clear(); fw::realAct.clear();
+        fw::pending.clear(); fw::inputs.clear(); fw::realAct.clear(); fw::fresh.clear();
         for (auto& s : fw::ring) s.frame = ~0u;
         fw::lastSnap = ~0u;
     }
     void fwShutdown() {
-        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear();
+        fw::pending.clear(); fw::ring.clear(); fw::inputs.clear(); fw::realAct.clear(); fw::fresh.clear();
         for (auto g : fw::pool) if (g) g->removeFromParent();
         fw::pool.clear(); fw::freeG.clear(); fw::lastSnap = ~0u;
     }
@@ -1275,10 +1277,12 @@ class $modify(CodaPlayLayer, PlayLayer) {
 
     // start of every physics step, before any click in it
     void fwSnap() {
-        if (!fwActive() || m_player1->m_isDead) return;
+        if (!fwActive()) return;
         unsigned cur = m_gameState.m_currentProgress;
         if (cur == fw::lastSnap) return;
+        if (!fw::fresh.empty()) this->fwSaveClicks();
         fw::lastSnap = cur;
+        if (m_player1->m_isDead) return;
         size_t N = (size_t)std::clamp(V::fwMax, 2, 20) + 1;
         if (fw::ring.size() != N) { for (auto& r : fw::ring) fwFree(r.g); fw::ring.assign(N, {}); }
         auto& r = fw::ring[cur % N];
@@ -1288,28 +1292,36 @@ class $modify(CodaPlayLayer, PlayLayer) {
         r.frame = cur;
     }
 
+    // a click only gets written down here; the copies are made at the start of the next step
     void fwInput(bool down, int button, bool isPlayer1) {
         if (!fwActive() || !isPlayer1 || button != 1 || m_player1->m_isDead) return;
         unsigned cur = m_gameState.m_currentProgress;
-        unsigned prev = fw::inputs.empty() ? 0 : fw::inputs.back().frame;
-        bool hadPrev = !fw::inputs.empty();
+        int lo = -std::clamp(V::fwMax, 2, 20);
+        if (!fw::inputs.empty()) lo = std::max(lo, -(int)(cur - fw::inputs.back().frame) + 1);
         fw::inputs.push_back({cur, down});
         if (!down && !V::fwReleases) return;
-        fw::Pending p;
-        p.frame = cur; p.down = down; p.K = std::clamp(V::fwMax, 2, 20);
-        p.pct = m_levelLength > 0 ? 100.f * m_player1->m_position.x / m_levelLength : 0.f;
+        float pct = m_levelLength > 0 ? 100.f * m_player1->m_position.x / m_levelLength : 0.f;
+        fw::fresh.push_back({cur, down, pct, lo});
+    }
+
+    void fwSaveClicks() {
         size_t N = fw::ring.size();
-        for (int i = 0; i <= p.K; i++) {
-            long long f = (long long)cur - p.K + i;
-            PlayerObject* g = nullptr;
-            if (f >= 0 && N) { auto& r = fw::ring[(size_t)f % N]; if (r.g && r.frame == (unsigned)f) { g = fwGhost(); if (g) copyState(r.g, g); } }
-            p.snaps.push_back(g);
+        for (auto& c : fw::fresh) {
+            fw::Pending p;
+            p.frame = c.frame; p.down = c.down; p.pct = c.pct; p.K = std::clamp(V::fwMax, 2, 20);
+            for (int i = 0; i <= p.K; i++) {
+                long long f = (long long)c.frame - p.K + i;
+                PlayerObject* g = nullptr;
+                if (f >= 0 && N) { auto& r = fw::ring[(size_t)f % N]; if (r.g && r.frame == (unsigned)f) { g = fwGhost(); if (g) copyState(r.g, g); } }
+                p.snaps.push_back(g);
+            }
+            p.lo = std::max(-p.K, std::min(0, c.lo)); p.hi = p.K;
+            if (m_player1->m_isDead) { p.died = true; p.ready = true; }
+            while (p.lo < 0 && !p.snaps[p.K + p.lo]) p.lo++;   // no copy that far back (just respawned)
+            fw::pending.push_back(std::move(p));
+            while (fw::pending.size() > 16) { fwDrop(fw::pending.front()); fw::pending.pop_front(); }
         }
-        p.lo = -p.K; p.hi = p.K;
-        if (hadPrev) p.lo = std::max(p.lo, -(int)(cur - prev) + 1);
-        while (!p.snaps.empty() && p.lo < 0 && !p.snaps[p.K + p.lo]) p.lo++;   // no copy that far back (just respawned)
-        fw::pending.push_back(std::move(p));
-        while (fw::pending.size() > 16) { fwDrop(fw::pending.front()); fw::pending.pop_front(); }
+        fw::fresh.clear();
     }
 
     void fwRealDeath() {
@@ -1600,7 +1612,6 @@ class $modify(GJBaseGameLayer) {
             return;   // Coda has the controls
         }
         bool mine = pl && pl == static_cast<GJBaseGameLayer*>(this) && !s_sim;
-        if (mine) static_cast<CodaPlayLayer*>(pl)->fwSnap();
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         if (mine) static_cast<CodaPlayLayer*>(pl)->fwInput(down, button, isPlayer1);
     }
@@ -1688,6 +1699,10 @@ class $modify(CodaLevelInfoLayer, LevelInfoLayer) {
 
 // ---------------------------------------------------------------- what the menu uses
 namespace fwin {
+    void beforeInputs() {
+        auto pl = PlayLayer::get();
+        if (pl && !s_sim) static_cast<CodaPlayLayer*>(pl)->fwSnap();
+    }
     std::deque<Result>& results() { return fw::results; }
     int waiting() { return (int)fw::pending.size(); }
     void clear() { fw::results.clear(); fw::counted = 0; }

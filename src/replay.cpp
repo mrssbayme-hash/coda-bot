@@ -154,6 +154,7 @@ class $modify(ReplayBaseLayer, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) fwin::beforeInputs();
         if (s_state == replay::State::Playing && pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) {
             long long cur = (long long)m_gameState.m_currentProgress;
             while (s_idx < s_inputs.size() && (long long)s_inputs[s_idx].frame + V::botOffset <= cur) {

@@ -34,6 +34,7 @@ namespace fwin {
         double shownAt = 0.0;
         int window() const { return early + late + 1; }
     };
+    void beforeInputs();            // copy where you are before this step's clicks
     std::deque<Result>& results();
     int waiting();
     void clear();
