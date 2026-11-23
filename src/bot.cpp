@@ -334,6 +334,8 @@ class $modify(CodaPlayLayer, PlayLayer) {
         double predX = 0, predY = 0, predYV = 0;
         int predMode = 0, desyncLogs = 0, probeLogs = 0;
         unsigned lastTick = ~0u;
+        int lastOk = 0;          // how many steps the current plan survived at the last check
+        int stepLogs = 0;
     };
 
     Brain& brain() { return s_brains[levelKey(m_level)]; }
@@ -660,7 +662,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (s_enabled && !m_isPlatformer && V::codaLookahead) {
             auto f = m_fields.self();
             s_fromBot = true; this->handleButton(false, 1, true); s_fromBot = false;
-            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0; f->probeLogs = 0; f->lastTick = ~0u;
+            f->held = false; f->look.clear(); f->lookTick = 0; f->lookPath.clear(); f->predValid = false; f->desyncLogs = 0; f->probeLogs = 0; f->lastTick = ~0u; f->stepLogs = 0;
             this->brain().attempts++;
             return;
         }
@@ -716,7 +718,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
             if (pct > b.bestPct) b.bestPct = pct;
             auto f2 = m_fields.self();
             int H = this->lookHorizon();
-            int okNow = f2->look.empty() ? 0 : this->lookCheck(f2->look);
+            int okNow = f2->lastOk;
             say("Died at " + std::to_string((int)pct) + "%. " + (okNow >= H ? std::string("My look-ahead said I'd make it, so something didn't go like I predicted.")
                                                                              : std::string("I saw it coming but couldn't find a way out.")), 3.f);
             log::info("[look] DIED x={:.1f} y={:.1f} yv={:.2f} mode={} mini={} upside={} held={} by obj id={} type={}", player->m_position.x, player->m_position.y,
@@ -1244,6 +1246,7 @@ class $modify(CodaPlayLayer, PlayLayer) {
         if (f->lookTick % step == 0 && !overBudget()) {
             float clear = 1e9f;
             int ok = this->lookCheck(f->look, nullptr, &clear);
+            f->lastOk = ok;
             if (ok >= H && clear < 6.f && f->lookTick % (step * 4) == 0) {
                 // survives, but only by a hair: small prediction errors would kill him. Look for room.
                 int d = 0; float c = 0.f;
@@ -1920,7 +1923,15 @@ class $modify(GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto pl = PlayLayer::get();
-        if (pl && pl == static_cast<GJBaseGameLayer*>(this)) static_cast<CodaPlayLayer*>(pl)->codaStep();
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this)) {
+            auto cp = static_cast<CodaPlayLayer*>(pl);
+            if (V::codaDebugLog && s_enabled && pl->m_player1 && cp->m_fields->stepLogs < 80) {
+                cp->m_fields->stepLogs++;
+                log::info("[step] dt={:.4f} half={} last={} progress={} x={:.3f} y={:.3f} pos.x={:.3f}", dt, isHalfTick, isLastTick,
+                          m_gameState.m_currentProgress, pl->m_player1->m_position.x, pl->m_player1->m_position.y, pl->m_player1->getPositionX());
+            }
+            cp->codaStep();
+        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 };
