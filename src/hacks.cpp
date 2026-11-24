@@ -33,7 +33,7 @@ namespace hacks {
         if (V::fpsBypass) {
             if (s_normalInterval <= 0.0) s_normalInterval = d->getAnimationInterval();
             PlatformToolbox::toggleVerticalSync(false);
-            d->setAnimationInterval(1.0 / (double)std::clamp(V::fps, 30, 10000));
+            d->setAnimationInterval(1.0 / (double)std::clamp(V::fps, 30, 100000));
         } else if (s_normalInterval > 0.0) {
             d->setAnimationInterval(s_normalInterval);
             s_normalInterval = 0.0;
@@ -81,7 +81,7 @@ namespace hacks {
         return true;
     }
     void applyTps() {
-        int want = V::tpsBypass ? std::clamp(V::tps, 30, 10000) : 240;
+        int want = V::tpsBypass ? std::clamp(V::tps, 30, 100000) : 240;
         if (want == s_tps) return;
         if (!setTps(want) && want != 240) menu::notify("TPS bypass doesn't work on this version of GD");
     }

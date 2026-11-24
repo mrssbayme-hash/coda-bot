@@ -231,7 +231,7 @@ namespace {
         if (PlayLayer::get()) { menu::notify("Leave the level you're in first"); return; }
         if (autoplay && V::rlAutoTps && e.fps > 240) {
             V::tpsBypass = true;
-            V::tps = std::clamp(e.fps, 30, 10000);
+            V::tps = std::clamp(e.fps, 30, 100000);
             if (auto f = cfg::find("tps")) cfg::changed(*f);
             if (auto f = cfg::find("tps-bypass")) cfg::changed(*f);
             menu::notify("TPS set to " + std::to_string(V::tps) + " for this level");
@@ -285,7 +285,7 @@ namespace roulette {
         if (V::rlLimitFps) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::InputInt("##maxfps", &V::rlMaxFps, 60, 240)) V::rlMaxFps = std::clamp(V::rlMaxFps, 30, 20000);
+            if (ImGui::InputInt("##maxfps", &V::rlMaxFps, 60, 240)) V::rlMaxFps = std::clamp(V::rlMaxFps, 30, 100000);
             if (ImGui::IsItemDeactivatedAfterEdit()) setChanged("rl-max-fps");
             ImGui::TextDisabled("AREDL and PILL levels count as 240. The ILL and SLL list the FPS each level needs.");
         }

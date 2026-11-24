@@ -203,10 +203,10 @@ namespace cfg {
         add(B("no-transition", "No transitions", "Level", &noTransition, "Menus switch instantly instead of fading."));
         // Bypass
         add(on(B("fps-bypass", "FPS bypass", "Bypass", &fpsBypass, "Turn VSync off in GD's settings for this to work."), [] { hacks::applyFps(); }));
-        add(on(I("fps", "FPS", "Bypass", &fps, 30, 10000, "fps-bypass", true), [] { hacks::applyFps(); }));
+        add(on(I("fps", "FPS", "Bypass", &fps, 30, 100000, "fps-bypass", true), [] { hacks::applyFps(); }));
         add(on(cheat(B("tps-bypass", "TPS bypass", "Bypass", &tpsBypass, "Physics steps per second. 240 is normal. Anything else can't count."),
             [] { return V::tpsBypass && V::tps != 240; }), [] { hacks::applyTps(); }));
-        add(on(I("tps", "TPS", "Bypass", &tps, 30, 10000, "tps-bypass", true), [] { hacks::applyTps(); }));
+        add(on(I("tps", "TPS", "Bypass", &tps, 30, 100000, "tps-bypass", true), [] { hacks::applyTps(); }));
         add(on(cheat(B("speedhack", "Speedhack", "Bypass", &speedhack, "Speeds the whole game up or down."),
             [] { return V::speedhack && std::abs(V::speed - 1.f) > .001f; }), [] { hacks::applySpeedAudio(); }));
         { auto sp = F("speed", "Speed", "Bypass", &speed, .01f, 10.f, "%.2fx", "speedhack"); sp.typed = true;
@@ -256,7 +256,7 @@ namespace cfg {
         add(I("rl-from", "From", "Roulette", &rlFrom, 1, 5000));
         add(I("rl-to", "To", "Roulette", &rlTo, 1, 5000));
         add(B("rl-limit-fps", "Max FPS/TPS needed", "Roulette", &rlLimitFps));
-        add(I("rl-max-fps", "Max FPS/TPS", "Roulette", &rlMaxFps, 30, 20000));
+        add(I("rl-max-fps", "Max FPS/TPS", "Roulette", &rlMaxFps, 30, 100000));
         add(B("rl-skip-beaten", "Skip levels I've beaten", "Roulette", &rlSkipBeaten));
         add(B("rl-skip-2p", "Skip 2-player levels", "Roulette", &rlSkip2P));
         add(B("rl-auto-tps", "Set TPS to what the level needs", "Roulette", &rlAutoTps));
