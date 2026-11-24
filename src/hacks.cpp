@@ -170,13 +170,14 @@ namespace hacks {
     }
     // mode: 0 = every physics step (more TPS = more boxes), 1 = every frame you see (more FPS = more boxes),
     //       2 = only when you click or let go (more clicks = more boxes)
-    static void recordTrail(PlayLayer* pl, int mode, bool click = false, int who = -1) {
-        if (!V::hitboxes || !V::hitboxTrail) { s_trail[0].clear(); s_trail[1].clear(); return; }
+    static bool s_edHeld[2] = {false, false};
+    static void recordTrail(GJBaseGameLayer* pl, int mode, bool click = false, int who = -1, bool editor = false) {
+        if (!pl || !V::hitboxes || !V::hitboxTrail) { s_trail[0].clear(); s_trail[1].clear(); return; }
         if (mode != V::hitboxTrailMode) return;
         PlayerObject* ps[2] = {pl->m_player1, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr};
         for (int i = 0; i < 2; i++) {
             if (who >= 0 && who != i) continue;
-            if (ps[i] && !ps[i]->m_isDead) s_trail[i].push_back({ps[i]->getObjectRect(), inner(ps[i]), s_stats.held[i], click});
+            if (ps[i] && !ps[i]->m_isDead) s_trail[i].push_back({ps[i]->getObjectRect(), inner(ps[i]), editor ? s_edHeld[i] : s_stats.held[i], click});
             while ((int)s_trail[i].size() > V::hitboxTrailLen) s_trail[i].pop_front();
         }
     }
@@ -195,6 +196,39 @@ namespace hacks {
                 box(n, p->getObjectRect(), V::hbPlayer);
                 box(n, inner(p), V::hbInner);
             }
+        }
+    }
+
+    // ------------------------------------------------------------ hitbox trail in the editor's playtest
+    static LevelEditorLayer* playtesting() {
+        auto ed = LevelEditorLayer::get();
+        return ed && ed->m_playbackMode == PlaybackMode::Playing ? ed : nullptr;
+    }
+    static CCDrawNode* s_edNode = nullptr;
+    static LevelEditorLayer* s_edFor = nullptr;
+    static bool s_edWasPlaying = false;
+    static void editorFrame() {
+        auto any = LevelEditorLayer::get();
+        if (!any) { s_edNode = nullptr; s_edFor = nullptr; s_edWasPlaying = false; return; }
+        if (s_edFor != any) { s_edNode = nullptr; s_edFor = any; }
+        auto ed = playtesting();
+        if (!ed) {
+            // playtest stopped (or paused): stopping clears it, pausing keeps it on screen
+            bool stopped = any->m_playbackMode == PlaybackMode::Not;
+            if (stopped && s_edWasPlaying) { s_trail[0].clear(); s_trail[1].clear(); s_edHeld[0] = s_edHeld[1] = false; if (s_edNode) s_edNode->clear(); }
+            if (stopped) s_edWasPlaying = false;
+            return;
+        }
+        if (!s_edWasPlaying) { s_trail[0].clear(); s_trail[1].clear(); s_edWasPlaying = true; }
+        recordTrail(ed, 1, false, -1, true);
+        if (!s_edNode && ed->m_objectLayer) { s_edNode = CCDrawNode::create(); ed->m_objectLayer->addChild(s_edNode, 9999); }
+        if (!s_edNode) return;
+        s_edNode->clear();
+        if (!V::hitboxes || !V::hitboxTrail) return;
+        for (auto& t : s_trail) for (auto& h : t) {
+            bool hold = V::hitboxTrailHold && (h.held || h.click);
+            box(s_edNode, h.outer, hold ? V::hbHold : V::hbPlayer);
+            box(s_edNode, h.inner, V::hbInner);
         }
     }
 
@@ -491,6 +525,12 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
 
     void handleButton(bool down, int button, bool isPlayer1) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
+        if (auto ed = playtesting(); ed && ed == static_cast<GJBaseGameLayer*>(this) && button == 1) {
+            int q = isPlayer1 ? 0 : 1;
+            s_edHeld[q] = down;
+            recordTrail(ed, 2, true, q, true);
+            return;
+        }
         if (PlayLayer::get() != static_cast<GJBaseGameLayer*>(this) || bot::simulating()) return;
         int p = isPlayer1 ? 0 : 1;
         if (button == 1 && s_stats.held[p] != down) playClick(down);
@@ -535,6 +575,7 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) recordTrail(pl, 0);
+        else if (auto ed = playtesting(); ed && ed == static_cast<GJBaseGameLayer*>(this)) recordTrail(ed, 0, false, -1, true);
     }
 };
 
@@ -599,6 +640,7 @@ class $modify(HackScheduler, CCScheduler) {
         if (V::speedhack) dt *= std::clamp(V::speed, .1f, 10.f);
         applySpeedAudio();      // keep the music in step, even after GD starts a new song
         CCScheduler::update(dt);
+        editorFrame();          // hitbox trail while you playtest in the editor
     }
 };
 
