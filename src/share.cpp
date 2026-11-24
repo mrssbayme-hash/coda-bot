@@ -16,7 +16,9 @@ using namespace geode::prelude;
 
 namespace {
     std::filesystem::path folder() {
-        auto p = Mod::get()->getConfigDir() / "levels";
+        auto s = Mod::get()->getConfigDir().string();
+        std::filesystem::path p(std::u8string(s.begin(), s.end()));
+        p /= "levels";
         std::error_code ec;
         std::filesystem::create_directories(p, ec);
         return p;
@@ -179,7 +181,7 @@ namespace share {
             ImGui::EndChild();
             ImGui::TextDisabled("Imported levels go to the top of My Levels in Create.");
         }
-        if (ImGui::Button("Open levels folder", ImVec2(-FLT_MIN, 0))) utils::file::openFolder(folder());
+        if (ImGui::Button("Open levels folder", ImVec2(-FLT_MIN, 0))) { auto u = folder().u8string(); utils::file::openFolder(std::string(u.begin(), u.end())); }
         if (!lastMsg.empty()) ImGui::TextColored(ImVec4(.45f, .9f, .55f, 1.f), "%s", lastMsg.c_str());
     }
 }
