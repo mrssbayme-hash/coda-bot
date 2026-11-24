@@ -144,6 +144,25 @@ namespace {
     }
 }
 
+namespace {
+    // a level string you copied (starts with H4sI) becomes a new level in My Levels
+    void importString(std::string data) {
+        data.erase(std::remove_if(data.begin(), data.end(), [](char c) { return c == '\n' || c == '\r' || c == ' ' || c == '\t' || c == '"'; }), data.end());
+        if (data.rfind("H4sI", 0) != 0 && data.rfind("kS38", 0) != 0 && data.rfind("kA", 0) != 0) {
+            menu::notify("The clipboard doesn't have a level string in it"); return;
+        }
+        auto lv = GJGameLevel::create();
+        lv->m_levelName = "Pasted level";
+        lv->m_levelString = data;
+        lv->m_creatorName = std::string(GameManager::get()->m_playerName);
+        lv->m_levelType = GJLevelType::Editor;
+        lv->m_isEditable = true;
+        LocalLevelManager::get()->m_localLevels->insertObject(lv, 0);
+        lastMsg = "Added \"Pasted level\" to My Levels";
+        menu::notify(lastMsg);
+    }
+}
+
 namespace share {
     void drawWindow() {
         auto lv = currentLevel();
@@ -154,13 +173,22 @@ namespace share {
         if (lv) {
             ImGui::TextUnformatted(std::string(lv->m_levelName).c_str());
             if (!std::string(lv->m_creatorName).empty()) { ImGui::SameLine(); ImGui::TextDisabled("by %s", std::string(lv->m_creatorName).c_str()); }
-            if (ImGui::Button("Export as .gmd", ImVec2(-FLT_MIN, 0))) exportLevel(lv);
+            float hw = (ImGui::GetContentRegionAvail().x - 4.f) / 2.f;
+            if (ImGui::Button("Export as .gmd", ImVec2(hw, 0))) exportLevel(lv);
+            ImGui::SameLine(0, 4);
+            if (ImGui::Button("Copy level string", ImVec2(-FLT_MIN, 0))) {
+                std::string data = lv->m_levelString;
+                if (data.empty()) menu::notify("This level isn't downloaded yet. Open it (or play it) first.");
+                else { (void)utils::clipboard::write(data); lastMsg = "Copied the level string (" + std::to_string(data.size()) + " characters)"; menu::notify("Level string copied"); }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The long code that holds every object in the level (zipped, then base64).\nPaste it into Import from clipboard, or another level tool.");
         } else {
             ImGui::PushTextWrapPos(0.f);
             ImGui::TextDisabled("Open a level's page, play it, or open it in the editor to export it.");
             ImGui::PopTextWrapPos();
         }
         ImGui::SeparatorText("Import");
+        if (ImGui::Button("Import level string from clipboard", ImVec2(-FLT_MIN, 0))) importString(utils::clipboard::read());
         if (hacks::now() - lastScan > 2.0) { scan(); lastScan = hacks::now(); }
         if (files.empty()) {
             ImGui::PushTextWrapPos(0.f);
