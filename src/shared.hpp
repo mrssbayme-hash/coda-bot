@@ -90,6 +90,9 @@ namespace safe {
 }
 
 // Level Roulette (roulette.cpp)
+// Coda Share (share.cpp): .gmd export and import, like GDShare
+namespace share { void drawWindow(); }
+
 namespace roulette {
     void drawWindow();
 }

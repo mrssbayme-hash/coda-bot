@@ -26,7 +26,7 @@ namespace {
     ImFont* s_body = nullptr;
     ImFont* s_title = nullptr;
 
-    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Frames", "Roulette", "Keybinds", "Coda"};
+    char const* const WINDOWS[] = {"Player", "Level", "Bypass", "Labels", "Coda Bot", "Frames", "Roulette", "Share", "Keybinds", "Coda"};
 
     ImU32 col(Col const& c, float alphaMul = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, c.a * alphaMul)); }
     ImVec4 v4(Col const& c, float a = -1.f) { return ImVec4(c.r, c.g, c.b, a < 0.f ? c.a : a); }
@@ -468,7 +468,7 @@ namespace {
             if (x + winW > io.DisplaySize.x - 8.f && i > 0) { x = 16.f; y += 340.f * scale; }
             ImVec2 def(x, y);
             x += winW + 12.f;
-            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0 && std::strcmp(name, "Roulette") != 0 && std::strcmp(name, "Frames") != 0) continue;
+            if (!anyMatch(name) && std::strcmp(name, "Coda") != 0 && std::strcmp(name, "Coda Bot") != 0 && std::strcmp(name, "Keybinds") != 0 && std::strcmp(name, "Roulette") != 0 && std::strcmp(name, "Frames") != 0 && std::strcmp(name, "Share") != 0) continue;
             ImGui::SetNextWindowPos(def, s_resetLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSizeConstraints(ImVec2(winW, 0.f), ImVec2(winW, io.DisplaySize.y - 20.f));
             bool kbWin = std::strcmp(name, "Keybinds") == 0;
@@ -485,6 +485,7 @@ namespace {
                 if (std::strcmp(name, "Coda") == 0 && !s_search[0]) codaStatus();
                 if (std::strcmp(name, "Keybinds") == 0) keybindsWindow();
                 else if (std::strcmp(name, "Roulette") == 0) roulette::drawWindow();
+                else if (std::strcmp(name, "Share") == 0) share::drawWindow();
                 else drawFields(name);
                 if (std::strcmp(name, "Frames") == 0 && !s_search[0]) framesWindow();
                 if (std::strcmp(name, "Bypass") == 0 && !hacks::tpsSupported())
