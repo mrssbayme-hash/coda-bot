@@ -57,7 +57,9 @@ namespace V {
     inline float clickVolume = .7f;
     inline bool hitboxes = false, hitboxesOnDeath = false, hitboxTrail = false;
     inline bool hitboxAccurate = true, hitboxHideRotated = true, hitboxFill = false;
-    inline int hitboxTrailLen = 240;
+    inline int hitboxTrailLen = 240, hitboxTrailMode = 0;
+    inline bool hitboxTrailHold = false;
+    inline Col hbHold{1.f, .55f, .1f, 1.f};
     inline float hitboxFillAlpha = .3f, hitboxWidth = 1.f;
     inline Col hbSolid{0.f, .247f, 1.f, 1.f}, hbDanger{1.f, 0.f, 0.f, 1.f}, hbPlayer{1.f, 1.f, 0.f, 1.f},
         hbInner{1.f, 0.f, .5f, 1.f}, hbOther{0.f, 1.f, 0.f, 1.f};

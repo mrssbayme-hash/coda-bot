@@ -148,7 +148,7 @@ namespace hacks {
     // ------------------------------------------------------------ hitbox drawing
     // Like Mega Hack and OpenHack: GD draws the level's hitboxes, we recolor them, and we add the
     // player's real hitbox (the box that hits spikes) plus the small inner box that hits solid blocks.
-    struct HB { CCRect outer, inner; };
+    struct HB { CCRect outer, inner; bool held = false; bool click = false; };
     static std::deque<HB> s_trail[2];
     static bool s_skipRecolor = false;
     static CCRect inner(PlayerObject* p) {
@@ -168,11 +168,15 @@ namespace hacks {
         n->drawPolygon(v, 4, c4(c, V::hitboxFill ? V::hitboxFillAlpha : 0.f), .25f * V::hitboxWidth, c4(c, c.a));
         s_skipRecolor = false;
     }
-    static void recordTrail(PlayLayer* pl) {
+    // mode: 0 = every physics step (more TPS = more boxes), 1 = every frame you see (more FPS = more boxes),
+    //       2 = only when you click or let go (more clicks = more boxes)
+    static void recordTrail(PlayLayer* pl, int mode, bool click = false, int who = -1) {
         if (!V::hitboxes || !V::hitboxTrail) { s_trail[0].clear(); s_trail[1].clear(); return; }
+        if (mode != V::hitboxTrailMode) return;
         PlayerObject* ps[2] = {pl->m_player1, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr};
         for (int i = 0; i < 2; i++) {
-            if (ps[i] && !ps[i]->m_isDead) s_trail[i].push_back({ps[i]->getObjectRect(), inner(ps[i])});
+            if (who >= 0 && who != i) continue;
+            if (ps[i] && !ps[i]->m_isDead) s_trail[i].push_back({ps[i]->getObjectRect(), inner(ps[i]), s_stats.held[i], click});
             while ((int)s_trail[i].size() > V::hitboxTrailLen) s_trail[i].pop_front();
         }
     }
@@ -180,7 +184,11 @@ namespace hacks {
         auto n = pl->m_debugDrawNode;
         if (!n || !hitboxesNow()) return;
         n->setVisible(true);
-        if (V::hitboxTrail) for (auto& t : s_trail) for (auto& h : t) { box(n, h.outer, V::hbPlayer); box(n, h.inner, V::hbInner); }
+        if (V::hitboxTrail) for (auto& t : s_trail) for (auto& h : t) {
+            bool hold = V::hitboxTrailHold && (h.held || h.click);
+            box(n, h.outer, hold ? V::hbHold : V::hbPlayer);
+            box(n, h.inner, V::hbInner);
+        }
         if (V::hitboxAccurate) {
             for (auto p : {pl->m_player1, pl->m_gameState.m_isDualMode ? pl->m_player2 : nullptr}) {
                 if (!p) continue;
@@ -399,6 +407,7 @@ class $modify(HackPlayLayer, PlayLayer) {
             if (m_background) m_background->setColor({40, 125, 255});
             if (m_middleground) m_middleground->setVisible(false);
         }
+        if (!m_isPaused) recordTrail(this, 1);
         drawPlayerHitboxes(this);
         // auto checkpoints
         if (V::autoCheckpoints && m_isPracticeMode && m_player1 && !m_player1->m_isDead && !m_isPaused) {
@@ -486,6 +495,7 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
         int p = isPlayer1 ? 0 : 1;
         if (button == 1 && s_stats.held[p] != down) playClick(down);
         if (button == 1) s_stats.held[p] = down;
+        if (button == 1) recordTrail(PlayLayer::get(), 2, true, p);
         if (down && button == 1) {
             double t = now();
             s_stats.clicks.push_back(t);
@@ -524,7 +534,7 @@ class $modify(HackBaseLayer, GJBaseGameLayer) {
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) recordTrail(pl);
+        if (pl && pl == static_cast<GJBaseGameLayer*>(this) && !bot::simulating()) recordTrail(pl, 0);
     }
 };
 

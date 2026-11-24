@@ -170,7 +170,11 @@ namespace cfg {
         add(B("hitbox-accurate", "Accurate player hitbox", "Player", &hitboxAccurate, "Draws your real hitbox (yellow) and the small inner one that solid blocks use (pink).", "hitboxes"));
         add(B("hitbox-hide-rotated", "Hide rotated hitbox", "Player", &hitboxHideRotated, "GD's own player box spins with your icon. This hides it.", "hitboxes"));
         add(B("hitbox-trail", "Hitbox trail", "Player", &hitboxTrail, "Leaves your hitbox behind on every physics step.", "hitboxes"));
-        add(I("hitbox-trail-len", "Trail length (steps)", "Player", &hitboxTrailLen, 10, 2000, "hitboxes"));
+        add(Ch("hitbox-trail-mode", "Trail adds a box", "Player", &hitboxTrailMode,
+            {"Every physics step (TPS)", "Every frame you see (FPS)", "Every click (CPS)"}, "hitboxes"));
+        add(I("hitbox-trail-len", "Trail length (boxes)", "Player", &hitboxTrailLen, 10, 2000, "hitboxes"));
+        add(B("hitbox-trail-hold", "Different color while holding", "Player", &hitboxTrailHold, "Boxes left while you hold (or click) get their own color.", "hitboxes"));
+        add(C("hb-hold", "Holding color", "Player", &hbHold, "hitboxes"));
         add(F("hitbox-width", "Border width", "Player", &hitboxWidth, .2f, 4.f, "%.1fx", "hitboxes"));
         add(B("hitbox-fill", "Fill hitboxes", "Player", &hitboxFill, "", "hitboxes"));
         add(F("hitbox-fill-alpha", "Fill opacity", "Player", &hitboxFillAlpha, 0.f, 1.f, "%.2f", "hitboxes"));
