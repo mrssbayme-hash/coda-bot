@@ -1,5 +1,5 @@
 // Level Roulette: roll a random level from the AREDL or the Impossible Levels List and go play it.
-// Lists are downloaded from aredl.net and impossiblelevels.com the first time you roll.
+// Lists are downloaded from aredl.net, impossiblelevels.com and the IPLL's GitHub the first time you roll.
 #include "config.hpp"
 #include "shared.hpp"
 #include <imgui.h>
@@ -10,6 +10,9 @@
 #include <map>
 #include <optional>
 #include <cfloat>
+#include <memory>
+#include <algorithm>
+#include <cctype>
 
 using namespace geode::prelude;
 
@@ -87,9 +90,62 @@ namespace {
         }
     }
 
+    // ---- PILL: the Impossible Platformer Levels List (IPLL). It's a website made from files on GitHub:
+    // one file with the order, and one small file per level with its ID.
+    char const* const PILL_DATA = "https://raw.githubusercontent.com/Romlekt/ImpossiblePlatformerLevelsList/main/data/";
+    std::string urlPart(std::string const& s) {
+        std::string o; char b[4];
+        for (unsigned char c : s) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+            else { std::snprintf(b, sizeof b, "%%%02X", c); o += b; }
+        }
+        return o;
+    }
+    void pillDone() {
+        auto& d = s_lists["PILL"];
+        d.loading = false; d.loaded = true;
+        std::sort(d.levels.begin(), d.levels.end(), [](Entry const& a, Entry const& b) { return a.pos < b.pos; });
+        if (d.levels.empty()) { d.loaded = false; d.error = "Couldn't read the PILL"; menu::notify(d.error); }
+        if (s_pendingRoll) roll();
+    }
+    void loadPill() {
+        auto& d = s_lists["PILL"];
+        d.loading = true; d.error.clear(); d.levels.clear();
+        async::spawn(web::WebRequest().get(std::string(PILL_DATA) + "_list.json"), [](web::WebResponse res) {
+            auto& d = s_lists["PILL"];
+            if (!res.ok()) { d.loading = false; d.loaded = false; d.error = "Couldn't reach the PILL (" + std::to_string(res.code()) + ")"; menu::notify(d.error); return; }
+            auto j = res.json();
+            if (j.isErr() || !j.unwrap().isArray()) { d.loading = false; d.loaded = false; d.error = "Couldn't read the PILL"; menu::notify(d.error); return; }
+            std::vector<std::string> names;
+            for (auto const& v : j.unwrap().asArray().unwrap()) if (auto n = v.asString(); n.isOk() && !n.unwrap().empty()) names.push_back(n.unwrap());
+            if (names.empty()) { d.error = "The PILL list is empty"; d.loading = false; d.loaded = false; menu::notify(d.error); return; }
+            auto left = std::make_shared<int>((int)names.size());
+            for (size_t i = 0; i < names.size(); i++) {
+                int pos = (int)i + 1;
+                std::string file = names[i];
+                async::spawn(web::WebRequest().get(std::string(PILL_DATA) + urlPart(file) + ".json"), [pos, file, left](web::WebResponse r) {
+                    auto& d = s_lists["PILL"];
+                    if (r.ok()) if (auto lj = r.json(); lj.isOk() && lj.unwrap().isObject()) {
+                        auto const& it = lj.unwrap();
+                        Entry e;
+                        e.list = "PILL";
+                        e.pos = pos;
+                        e.name = it["name"].asString().unwrapOr(file);
+                        auto idv = it["id"];
+                        e.id = idv.isString() ? geode::utils::numFromString<int>(idv.asString().unwrapOr("0")).unwrapOr(0) : (int)idv.asInt().unwrapOr(0);
+                        e.twoP = e.name.find("[2P]") != std::string::npos;
+                        if (e.id > 0) d.levels.push_back(e);
+                    }
+                    if (--*left == 0) pillDone();
+                });
+            }
+        });
+    }
+
     void load(std::string const& name) {
         auto& d = s_lists[name];
         if (d.loading || d.loaded) return;
+        if (name == "PILL") { loadPill(); return; }
         std::string url;
         if (name == "AREDL") url = "https://api.aredl.net/v2/api/aredl/levels";
         else if (name == "ILL") url = "https://api.impossiblelevels.com/api/Levels";
@@ -111,7 +167,7 @@ namespace {
 
     std::vector<std::string> chosen() {
         int c = V::rlList;
-        if (c == 4) return {"AREDL", "ILL"};
+        if (c == 4) return {"AREDL", "ILL", "PILL"};
         return {LISTS[std::clamp(c, 0, 3)]};
     }
 
@@ -199,8 +255,9 @@ namespace roulette {
             if (ImGui::Button(LISTS[i], ImVec2(w, 0))) { V::rlList = i; setChanged("rl-list"); }
             if (on) ImGui::PopStyleColor(2);
         }
-        if (V::rlList == 2 || V::rlList == 3)
-            ImGui::TextColored(ImVec4(1.f, .65f, .45f, 1.f), "%s isn't connected yet. Send its website to add it.", LISTS[V::rlList]);
+        if (V::rlList == 2)
+            ImGui::TextColored(ImVec4(1.f, .65f, .45f, 1.f), "TILL isn't connected yet. Send its website to add it.");
+        if (V::rlList == 3) ImGui::TextDisabled("The Impossible Platformer Levels List (platformer levels).");
         // how many levels in the chosen lists
         size_t total = 0; bool loading = false;
         for (auto& n : chosen()) { auto& d = s_lists[n]; total += d.levels.size(); loading |= d.loading; }
@@ -228,7 +285,7 @@ namespace roulette {
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::InputInt("##maxfps", &V::rlMaxFps, 60, 240)) V::rlMaxFps = std::clamp(V::rlMaxFps, 30, 20000);
             if (ImGui::IsItemDeactivatedAfterEdit()) setChanged("rl-max-fps");
-            ImGui::TextDisabled("AREDL levels count as 240. The ILL lists the FPS each level needs.");
+            ImGui::TextDisabled("AREDL and PILL levels count as 240. The ILL lists the FPS each level needs.");
         }
         if (ImGui::Checkbox("Skip levels I've beaten", &V::rlSkipBeaten)) setChanged("rl-skip-beaten");
         if (ImGui::Checkbox("Skip 2-player levels", &V::rlSkip2P)) setChanged("rl-skip-2p");
@@ -288,7 +345,7 @@ namespace roulette {
         ImGui::PopStyleColor();
         if (lockRoll) ImGui::EndDisabled();
         if (lockRoll) ImGui::TextDisabled("In roulette mode you have to play the level you rolled.");
-        ImGui::TextDisabled("Lists come from aredl.net and impossiblelevels.com.");
+        ImGui::TextDisabled("Lists come from aredl.net, impossiblelevels.com and the IPLL on GitHub.");
     }
 }
 
