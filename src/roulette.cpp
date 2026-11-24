@@ -32,7 +32,7 @@ namespace {
     bool s_pendingRoll = false;
     int s_autoplay = 0;
     std::mt19937 s_rng{std::random_device{}()};
-    char const* const LISTS[] = {"AREDL", "ILL", "TILL", "PILL", "All"};
+    char const* const LISTS[] = {"AREDL", "ILL", "SLL", "PILL", "All"};
     char const* const LENGTHS[] = {"Tiny", "Short", "Medium", "Long", "XL"};
 
     int lenFromSeconds(double s) { return s < 10 ? 0 : s < 30 ? 1 : s < 60 ? 2 : s < 120 ? 3 : 4; }
@@ -74,12 +74,14 @@ namespace {
         }
     }
 
-    void parseIll(matjson::Value const& json, ListData& out) {
-        if (!json.isArray()) { out.error = "The ILL sent something unexpected"; return; }
+    // the ILL and the Silent Levels List (SLL) come from the same place, marked by listType
+    void parseIll(matjson::Value const& json, ListData& out, std::string const& list) {
+        if (!json.isArray()) { out.error = "The " + list + " sent something unexpected"; return; }
         for (auto const& it : json.asArray().unwrap()) {
             if (!it.isObject() || !it["visible"].asBool().unwrapOr(false)) continue;
+            if (it.contains("listType") && it["listType"].isString() && it["listType"].asString().unwrapOr(list) != list) continue;
             Entry e;
-            e.list = "ILL";
+            e.list = list;
             e.pos = (int)it["rank"].asInt().unwrapOr(0);
             e.name = it["name"].asString().unwrapOr("");
             auto idv = it["levelId"];
@@ -149,6 +151,7 @@ namespace {
         std::string url;
         if (name == "AREDL") url = "https://api.aredl.net/v2/api/aredl/levels";
         else if (name == "ILL") url = "https://api.impossiblelevels.com/api/Levels";
+        else if (name == "SLL") url = "https://api.impossiblelevels.com/api/Levels?listType=SLL";
         else { d.loaded = true; d.error = name + " isn't connected yet"; return; }
         d.loading = true;
         d.error.clear();
@@ -159,7 +162,7 @@ namespace {
             if (!res.ok()) { d.error = "Couldn't reach " + name + " (" + std::to_string(res.code()) + ")"; d.loaded = false; }
             else if (auto j = res.json(); j.isErr()) { d.error = "Couldn't read the " + name + " list"; d.loaded = false; }
             else if (name == "AREDL") parseAredl(j.unwrap(), d);
-            else parseIll(j.unwrap(), d);
+            else parseIll(j.unwrap(), d, name);
             if (!d.error.empty()) menu::notify(d.error);
             if (s_pendingRoll) roll();
         });
@@ -167,7 +170,7 @@ namespace {
 
     std::vector<std::string> chosen() {
         int c = V::rlList;
-        if (c == 4) return {"AREDL", "ILL", "PILL"};
+        if (c == 4) return {"AREDL", "ILL", "SLL", "PILL"};
         return {LISTS[std::clamp(c, 0, 3)]};
     }
 
@@ -255,8 +258,7 @@ namespace roulette {
             if (ImGui::Button(LISTS[i], ImVec2(w, 0))) { V::rlList = i; setChanged("rl-list"); }
             if (on) ImGui::PopStyleColor(2);
         }
-        if (V::rlList == 2)
-            ImGui::TextColored(ImVec4(1.f, .65f, .45f, 1.f), "TILL isn't connected yet. Send its website to add it.");
+        if (V::rlList == 2) ImGui::TextDisabled("The Silent Levels List (silent levels).");
         if (V::rlList == 3) ImGui::TextDisabled("The Impossible Platformer Levels List (platformer levels).");
         // how many levels in the chosen lists
         size_t total = 0; bool loading = false;
@@ -285,7 +287,7 @@ namespace roulette {
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::InputInt("##maxfps", &V::rlMaxFps, 60, 240)) V::rlMaxFps = std::clamp(V::rlMaxFps, 30, 20000);
             if (ImGui::IsItemDeactivatedAfterEdit()) setChanged("rl-max-fps");
-            ImGui::TextDisabled("AREDL and PILL levels count as 240. The ILL lists the FPS each level needs.");
+            ImGui::TextDisabled("AREDL and PILL levels count as 240. The ILL and SLL list the FPS each level needs.");
         }
         if (ImGui::Checkbox("Skip levels I've beaten", &V::rlSkipBeaten)) setChanged("rl-skip-beaten");
         if (ImGui::Checkbox("Skip 2-player levels", &V::rlSkip2P)) setChanged("rl-skip-2p");
@@ -300,7 +302,7 @@ namespace roulette {
             ImGui::TextUnformatted(e.name.c_str());
             std::string meta = "ID " + std::to_string(e.id);
             if (e.len >= 0) meta += std::string("  -  ") + LENGTHS[e.len];
-            if (e.list == "ILL") meta += "  -  needs " + std::to_string(e.fps) + " FPS";
+            if (e.list == "ILL" || e.list == "SLL") meta += "  -  needs " + std::to_string(e.fps) + " FPS";
             if (e.twoP) meta += "  -  2 player";
             ImGui::TextDisabled("%s", meta.c_str());
         } else if (s_pendingRoll) ImGui::TextDisabled("Getting the list ready...");
