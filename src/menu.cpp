@@ -169,6 +169,21 @@ namespace {
                 break;
             }
             case cfg::T::Float: {
+                if (f.typed) {
+                    // a box you type in (with - and + buttons), kept between the field's limits
+                    float& v = *(float*)f.ptr;
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(f.label.c_str());
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    bool hit = ImGui::InputFloat("##v", &v, .01f, .1f, "%.2f");
+                    bool typing = ImGui::IsItemActive();
+                    if (!typing) v = std::clamp(v, f.mn, f.mx);
+                    if (hit && f.onChange && v >= f.mn && v <= f.mx) f.onChange();
+                    if (ImGui::IsItemDeactivatedAfterEdit() || (hit && !typing)) { v = std::clamp(v, f.mn, f.mx); if (f.onChange) f.onChange(); cfg::changed(f); }
+                    if (ImGui::IsItemHovered() && !f.tip.empty()) ImGui::SetTooltip("%s", f.tip.c_str());
+                    break;
+                }
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 std::string fmt = f.label + ": " + f.fmt;
                 if (ImGui::SliderFloat("##v", (float*)f.ptr, f.mn, f.mx, fmt.c_str())) { if (f.onChange) f.onChange(); }

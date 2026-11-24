@@ -92,7 +92,7 @@ namespace hacks {
     void applySpeedAudio() {
         auto fmod = FMODAudioEngine::sharedEngine();
         if (!fmod || !fmod->m_system) return;
-        float pitch = (V::speedhack && V::speedAudio) ? std::clamp(V::speed, .1f, 10.f) : 1.f;
+        float pitch = (V::speedhack && V::speedAudio) ? std::clamp(V::speed, .01f, 10.f) : 1.f;
         FMOD::ChannelGroup* master = nullptr;
         if (fmod->m_system->getMasterChannelGroup(&master) == FMOD_OK && master) {
             float cur = 1.f;
@@ -637,7 +637,7 @@ class $modify(HackGameManager, GameManager) {
 
 class $modify(HackScheduler, CCScheduler) {
     void update(float dt) {
-        if (V::speedhack) dt *= std::clamp(V::speed, .1f, 10.f);
+        if (V::speedhack) dt *= std::clamp(V::speed, .01f, 10.f);
         applySpeedAudio();      // keep the music in step, even after GD starts a new song
         CCScheduler::update(dt);
         editorFrame();          // hitbox trail while you playtest in the editor

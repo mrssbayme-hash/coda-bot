@@ -209,7 +209,8 @@ namespace cfg {
         add(on(I("tps", "TPS", "Bypass", &tps, 30, 10000, "tps-bypass", true), [] { hacks::applyTps(); }));
         add(on(cheat(B("speedhack", "Speedhack", "Bypass", &speedhack, "Speeds the whole game up or down."),
             [] { return V::speedhack && std::abs(V::speed - 1.f) > .001f; }), [] { hacks::applySpeedAudio(); }));
-        add(on(F("speed", "Speed", "Bypass", &speed, .1f, 10.f, "%.2fx", "speedhack"), [] { hacks::applySpeedAudio(); }));
+        { auto sp = F("speed", "Speed", "Bypass", &speed, .01f, 10.f, "%.2fx", "speedhack"); sp.typed = true;
+          sp.tip = "Type any speed from 0.01x to 10x and press Enter, or use - and +."; add(on(sp, [] { hacks::applySpeedAudio(); })); }
         add(on(B("speed-audio", "Music follows speed", "Bypass", &speedAudio, "", "speedhack"), [] { hacks::applySpeedAudio(); }));
         add(B("icon-hack", "Unlock all icons", "Bypass", &iconHack, "Every icon and color can be picked in the icon kit."));
         // Labels
